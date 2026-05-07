@@ -50,9 +50,9 @@ pub fn resetRequestArena() void {
 const len_prefix_bytes: usize = @sizeOf(usize);
 
 /// Allocate `len` bytes that the host can later free by pointer
-/// alone. Returns null on OOM.
+/// alone. Returns null on OOM or on `len + prefix` overflow.
 pub fn hostMalloc(len: usize) ?[*]u8 {
-    const total = len + len_prefix_bytes;
+    const total = std.math.add(usize, len, len_prefix_bytes) catch return null;
     const slice = host_allocator.alignedAlloc(u8, .of(usize), total) catch return null;
     const len_slot: *usize = @ptrCast(slice.ptr);
     len_slot.* = len;

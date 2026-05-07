@@ -50,17 +50,20 @@ extern "env" fn proxy_log(
     msg_size: usize,
 ) i32;
 
+// Return-data pointers are nullable: per the proxy-wasm spec, hosts
+// may signal "no data" with a null pointer + zero size for empty or
+// missing values.
 extern "env" fn proxy_get_buffer_bytes(
     buffer_type: i32,
     start: usize,
     max_size: usize,
-    return_buffer_data: *[*]u8,
+    return_buffer_data: *?[*]u8,
     return_buffer_size: *usize,
 ) i32;
 
 extern "env" fn proxy_get_header_map_pairs(
     map_type: i32,
-    return_buffer_data: *[*]u8,
+    return_buffer_data: *?[*]u8,
     return_buffer_size: *usize,
 ) i32;
 
@@ -68,7 +71,7 @@ extern "env" fn proxy_get_header_map_value(
     map_type: i32,
     key_data: [*]const u8,
     key_size: usize,
-    return_value_data: *[*]u8,
+    return_value_data: *?[*]u8,
     return_value_size: *usize,
 ) i32;
 
@@ -101,7 +104,7 @@ export fn proxy_on_vm_start(_: i32, _: i32) i32 {
 export fn proxy_on_configure(_: i32, configuration_size: i32) i32 {
     if (configuration_size <= 0) return result_ok;
 
-    var data: [*]u8 = undefined;
+    var data: ?[*]u8 = null;
     var data_size: usize = 0;
     const status = proxy_get_buffer_bytes(
         buffer_type_plugin_configuration,
@@ -112,13 +115,14 @@ export fn proxy_on_configure(_: i32, configuration_size: i32) i32 {
     );
     if (status != status_ok) return 0;
 
+    const ptr = data orelse return 0;
+    defer if (data_size > 0) memory.hostFree(ptr);
+
     if (configured_policy) |old| memory.host_allocator.free(old);
-    configured_policy = memory.host_allocator.dupe(u8, data[0..data_size]) catch {
-        memory.hostFree(data);
+    configured_policy = memory.host_allocator.dupe(u8, ptr[0..data_size]) catch {
         configured_policy = null;
         return 0;
     };
-    memory.hostFree(data);
     return result_ok;
 }
 
@@ -225,7 +229,7 @@ fn readSingleHeader(
     map_type: i32,
     key: []const u8,
 ) !?[]const u8 {
-    var data: [*]u8 = undefined;
+    var data: ?[*]u8 = null;
     var data_size: usize = 0;
     const status = proxy_get_header_map_value(
         map_type,
@@ -235,10 +239,11 @@ fn readSingleHeader(
         &data_size,
     );
     if (status != status_ok) return null;
-    // Some hosts return ok + null pointer for missing keys.
+    // Hosts may signal "missing" with null + 0; do not free in that case.
     if (data_size == 0) return null;
-    defer memory.hostFree(data);
-    return try allocator.dupe(u8, data[0..data_size]);
+    const ptr = data orelse return null;
+    defer memory.hostFree(ptr);
+    return try allocator.dupe(u8, ptr[0..data_size]);
 }
 
 /// Decode the proxy-wasm header-map serialisation:
@@ -249,33 +254,41 @@ fn readSingleHeader(
 ///   (key, NUL, value, NUL) * N
 /// ```
 fn readAllHeaders(allocator: std.mem.Allocator, map_type: i32) ![]HeaderPair {
-    var data: [*]u8 = undefined;
+    var data: ?[*]u8 = null;
     var data_size: usize = 0;
     const status = proxy_get_header_map_pairs(map_type, &data, &data_size);
     if (status != status_ok) return &[_]HeaderPair{};
     if (data_size == 0) return &[_]HeaderPair{};
-    defer memory.hostFree(data);
+    const ptr = data orelse return &[_]HeaderPair{};
+    defer memory.hostFree(ptr);
 
     if (data_size < 4) return error.InvalidHeaderMap;
-    const buf = data[0..data_size];
+    const buf = ptr[0..data_size];
 
     const num = std.mem.readInt(u32, buf[0..4], .little);
     if (num == 0) return &[_]HeaderPair{};
 
+    // Checked arithmetic: on wasm32 `usize` is 32 bits, so a
+    // sufficiently large `num` (or per-entry size) read from the
+    // host buffer can wrap and bypass the bounds check below.
     const sizes_off: usize = 4;
-    const sizes_len: usize = @as(usize, num) * 8;
-    if (buf.len < sizes_off + sizes_len) return error.InvalidHeaderMap;
+    const sizes_len = std.math.mul(usize, num, 8) catch return error.InvalidHeaderMap;
+    const sizes_end = std.math.add(usize, sizes_off, sizes_len) catch return error.InvalidHeaderMap;
+    if (buf.len < sizes_end) return error.InvalidHeaderMap;
 
     var headers = try allocator.alloc(HeaderPair, num);
-    var p: usize = sizes_off + sizes_len;
+    var p: usize = sizes_end;
     var i: usize = 0;
     while (i < num) : (i += 1) {
         const so = sizes_off + i * 8;
         const key_size = std.mem.readInt(u32, buf[so .. so + 4][0..4], .little);
         const value_size = std.mem.readInt(u32, buf[so + 4 .. so + 8][0..4], .little);
 
-        const need: usize = @as(usize, key_size) + 1 + @as(usize, value_size) + 1;
-        if (p + need > buf.len) return error.InvalidHeaderMap;
+        // (key_size + 1) + (value_size + 1), guarded.
+        const kv = std.math.add(usize, key_size, value_size) catch return error.InvalidHeaderMap;
+        const need = std.math.add(usize, kv, 2) catch return error.InvalidHeaderMap;
+        const end = std.math.add(usize, p, need) catch return error.InvalidHeaderMap;
+        if (end > buf.len) return error.InvalidHeaderMap;
 
         const key = try allocator.dupe(u8, buf[p .. p + key_size]);
         p += @as(usize, key_size) + 1; // skip NUL terminator
@@ -285,17 +298,6 @@ fn readAllHeaders(allocator: std.mem.Allocator, map_type: i32) ![]HeaderPair {
     }
 
     return headers;
-}
-
-/// Copy a host buffer (body, configuration, ...) into `allocator`.
-/// The host-supplied scratch is freed on the way out.
-fn readBuffer(allocator: std.mem.Allocator, buffer_type: i32, max_size: usize) ![]const u8 {
-    var data: [*]u8 = undefined;
-    var data_size: usize = 0;
-    const status = proxy_get_buffer_bytes(buffer_type, 0, max_size, &data, &data_size);
-    if (status != status_ok) return error.HostBufferReadFailed;
-    defer memory.hostFree(data);
-    return try allocator.dupe(u8, data[0..data_size]);
 }
 
 fn appendJsonString(
@@ -311,10 +313,20 @@ fn appendJsonString(
             '\n' => try buf.appendSlice(allocator, "\\n"),
             '\r' => try buf.appendSlice(allocator, "\\r"),
             '\t' => try buf.appendSlice(allocator, "\\t"),
-            // JSON requires escaping every <0x20 control char; HTTP
-            // headers and bodies in practice don't hit them. Extend
-            // if you need to.
-            else => try buf.append(allocator, c),
+            0x08 => try buf.appendSlice(allocator, "\\b"),
+            0x0c => try buf.appendSlice(allocator, "\\f"),
+            else => {
+                if (c < 0x20) {
+                    // RFC 8259 requires every <0x20 control byte to
+                    // be escaped. Fall back to \u00XX for the ones
+                    // without a short form.
+                    var hex_buf: [6]u8 = undefined;
+                    const hex = std.fmt.bufPrint(&hex_buf, "\\u{x:0>4}", .{c}) catch unreachable;
+                    try buf.appendSlice(allocator, hex);
+                } else {
+                    try buf.append(allocator, c);
+                }
+            },
         }
     }
     try buf.append(allocator, '"');

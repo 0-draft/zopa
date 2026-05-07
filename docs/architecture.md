@@ -91,6 +91,14 @@ allocated `Scope` linked list. Each iterator pushes a frame for the
 duration of one body evaluation; refs walk the chain before falling
 back to the input root.
 
+Scope is local to the iterator. Bindings introduced inside a rule
+body are not visible from that rule's `value` expression -- the
+value is resolved with a fresh, empty scope. A policy that needs to
+reference a body-bound variable from `value` must move the
+computation inside the body or restructure to compute the value
+inline. Lifting body bindings into the value position is on the
+roadmap.
+
 Recursion is capped at `max_eval_depth = 32`. Hitting the cap returns
 `error.EvalTooDeep`, which the export wrapper folds to `-1` and the
 proxy-wasm shim treats as deny.
