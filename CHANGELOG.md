@@ -4,10 +4,7 @@ All notable changes are recorded here. Format follows
 [Keep a Changelog][kac]; releases follow [Semantic Versioning][semver]
 once the first stable tag ships.
 
-[kac]: https://keepachangelog.com/en/1.1.0/
-[semver]: https://semver.org/spec/v2.0.0.html
-
-## Unreleased
+## [Unreleased]
 
 ## [0.1.0] - 2026-05-07
 
@@ -41,4 +38,7 @@ callback semantics) is still alpha and may change before 1.0.
 - README badges (CI, OpenSSF Scorecard) now resolve. They were left
   pointing at `kanywst/zopa` after the repo moved to `0-draft/zopa`.
 
+[kac]: https://keepachangelog.com/en/1.1.0/
+[semver]: https://semver.org/spec/v2.0.0.html
+[Unreleased]: https://github.com/0-draft/zopa/compare/v0.1.0...HEAD
 [0.1.0]: https://github.com/0-draft/zopa/releases/tag/v0.1.0
