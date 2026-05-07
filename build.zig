@@ -78,7 +78,10 @@ pub fn build(b: *std.Build) void {
     // `zig build test-envoy` -> end-to-end check against a real Envoy.
     // Exercises the proxy-wasm ABI path (configure / request_headers /
     // send_local_response) that the generic-ABI tests can't reach.
-    const envoy_run = b.addSystemCommand(&.{"examples/envoy/run.sh"});
+    // Invoke through `bash` so we don't depend on the script's
+    // execute bit, which can be lost on fresh clones or filesystems
+    // that don't preserve mode bits.
+    const envoy_run = b.addSystemCommand(&.{ "bash", "examples/envoy/run.sh" });
     envoy_run.step.dependOn(b.getInstallStep());
     const test_envoy_step = b.step(
         "test-envoy",
