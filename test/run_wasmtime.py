@@ -1,0 +1,245 @@
+#!/usr/bin/env python3
+"""Wasmtime-driven integration tests for zopa.wasm.
+
+The same suite as test/run.mjs against a different runtime, to surface
+host-specific quirks before they hit a real embedder.
+
+    .venv-test/bin/python test/run_wasmtime.py
+    zig build test-wasmtime
+"""
+
+from __future__ import annotations
+
+import json
+import sys
+from pathlib import Path
+
+import wasmtime
+
+
+WASM_PATH = Path(sys.argv[1]) if len(sys.argv) > 1 else Path("zig-out/bin/zopa.wasm")
+
+
+def make_stub(return_value: int):
+    """Stub callable for `Linker.define_func`. proxy-wasm imports
+    aren't reached by the generic-ABI tests; a fired stub means the
+    harness drifted."""
+
+    def stub(*_args):
+        return return_value
+
+    return stub
+
+
+def build_instance() -> tuple[wasmtime.Store, wasmtime.Instance]:
+    engine = wasmtime.Engine()
+    store = wasmtime.Store(engine)
+    linker = wasmtime.Linker(engine)
+
+    i32 = wasmtime.ValType.i32()
+    # Every proxy-wasm import declared in src/proxy_wasm.zig must
+    # resolve, even though we don't call them here.
+    imports: list[tuple[str, list[wasmtime.ValType], int]] = [
+        ("proxy_log", [i32, i32, i32], 0),
+        ("proxy_get_buffer_bytes", [i32, i32, i32, i32, i32], 1),
+        ("proxy_get_header_map_pairs", [i32, i32, i32], 1),
+        ("proxy_get_header_map_value", [i32, i32, i32, i32, i32], 1),
+        ("proxy_send_local_response", [i32] * 8, 0),
+    ]
+    for name, params, ret in imports:
+        ftype = wasmtime.FuncType(params, [i32])
+        linker.define_func("env", name, ftype, make_stub(ret))
+
+    module = wasmtime.Module.from_file(engine, str(WASM_PATH))
+    instance = linker.instantiate(store, module)
+    return store, instance
+
+
+store, instance = build_instance()
+exports = instance.exports(store)
+malloc = exports["malloc"]
+free = exports["free"]
+evaluate = exports["evaluate"]
+memory: wasmtime.Memory = exports["memory"]
+
+
+def write_bytes(payload: bytes) -> tuple[int, int]:
+    """Allocate inside wasm linear memory and copy the payload in.
+    Returns `(ptr, len)`. The caller frees `ptr` via `free(store, ptr)`."""
+    size = len(payload)
+    ptr = malloc(store, size)
+    if ptr == 0:
+        raise RuntimeError("wasm malloc returned null")
+    memory.write(store, payload, ptr)
+    return ptr, size
+
+
+def write_json(obj) -> tuple[int, int]:
+    return write_bytes(json.dumps(obj).encode("utf-8"))
+
+
+def decide(input_obj, ast_obj) -> int:
+    ip, il = write_json(input_obj)
+    ap, al = write_json(ast_obj)
+    try:
+        return evaluate(store, ip, il, ap, al)
+    finally:
+        free(store, ip)
+        free(store, ap)
+
+
+# ---------------------------------------------------------------------------
+# Tiny assertion helper.
+# ---------------------------------------------------------------------------
+
+failed = 0
+
+
+def check(name: str, got, expected):
+    global failed
+    if got == expected:
+        print(f"PASS  {name}")
+    else:
+        print(f"FAIL  {name}: got {got!r}, expected {expected!r}")
+        failed += 1
+
+
+# ---------------------------------------------------------------------------
+# Cases (kept in lockstep with test/run.mjs).
+# ---------------------------------------------------------------------------
+
+ref_role = {"type": "ref", "path": ["input", "user", "role"]}
+ref_age = {"type": "ref", "path": ["input", "age"]}
+
+check("bare literal true -> allow", decide({}, {"type": "value", "value": True}), 1)
+check("bare literal false -> deny", decide({}, {"type": "value", "value": False}), 0)
+
+check(
+    "compare eq -> allow",
+    decide(
+        {"user": {"role": "admin"}},
+        {"type": "compare", "op": "eq", "left": ref_role, "right": {"type": "value", "value": "admin"}},
+    ),
+    1,
+)
+check(
+    "compare neq -> allow on mismatch",
+    decide(
+        {"user": {"role": "guest"}},
+        {"type": "compare", "op": "neq", "left": ref_role, "right": {"type": "value", "value": "admin"}},
+    ),
+    1,
+)
+
+check(
+    "compare lt -> allow",
+    decide({"age": 17}, {"type": "compare", "op": "lt", "left": ref_age, "right": {"type": "value", "value": 18}}),
+    1,
+)
+check(
+    "compare gte -> allow at boundary",
+    decide({"age": 18}, {"type": "compare", "op": "gte", "left": ref_age, "right": {"type": "value", "value": 18}}),
+    1,
+)
+
+check(
+    "not flips false to allow",
+    decide({"admin": False}, {"type": "not", "expr": {"type": "ref", "path": ["input", "admin"]}}),
+    1,
+)
+
+admin_policy = {
+    "type": "module",
+    "rules": [
+        {"type": "rule", "name": "allow", "default": True, "value": {"type": "value", "value": False}},
+        {
+            "type": "rule",
+            "name": "allow",
+            "body": [{"type": "eq", "left": ref_role, "right": {"type": "value", "value": "admin"}}],
+        },
+    ],
+}
+check("module default deny when not admin", decide({"user": {"role": "guest"}}, admin_policy), 0)
+check("module rule fires when admin", decide({"user": {"role": "admin"}}, admin_policy), 1)
+
+age_gate = {
+    "type": "module",
+    "rules": [
+        {
+            "type": "rule",
+            "name": "allow",
+            "body": [{"type": "value", "value": True}],
+            "value": {"type": "compare", "op": "gte", "left": ref_age, "right": {"type": "value", "value": 18}},
+        },
+    ],
+}
+check("nested compare in value: 25 >= 18 -> allow", decide({"age": 25}, age_gate), 1)
+check("nested compare in value: 12 >= 18 -> deny", decide({"age": 12}, age_gate), 0)
+
+# Surrogate pair: U+1D11E (musical symbol G clef). Round-trip via JSON
+# escape on the AST side and the actual codepoint on the input side.
+input_ptr_size = write_bytes(json.dumps({"name": "\U0001D11E"}).encode("utf-8"))
+ast_text = (
+    '{"type":"compare","op":"eq",'
+    '"left":{"type":"ref","path":["input","name"]},'
+    '"right":{"type":"value","value":"\\uD834\\uDD1E"}}'
+)
+ast_ptr_size = write_bytes(ast_text.encode("utf-8"))
+result = evaluate(store, input_ptr_size[0], input_ptr_size[1], ast_ptr_size[0], ast_ptr_size[1])
+free(store, input_ptr_size[0])
+free(store, ast_ptr_size[0])
+check("surrogate-pair literal equals U+1D11E in input", result, 1)
+
+# Nested `not` past the depth cap.
+nested = {"type": "value", "value": True}
+for _ in range(64):
+    nested = {"type": "not", "expr": nested}
+check("64 nested nots trip depth guard -> -1", decide({}, nested), -1)
+
+# some / every -- match the JS suite.
+some_admin = {
+    "type": "some",
+    "var": "tag",
+    "source": {"type": "ref", "path": ["input", "tags"]},
+    "body": {"type": "eq", "left": {"type": "ref", "path": ["tag"]}, "right": {"type": "value", "value": "admin"}},
+}
+check("some: matching element -> allow", decide({"tags": ["viewer", "admin"]}, some_admin), 1)
+check("some: no match -> deny", decide({"tags": ["viewer"]}, some_admin), 0)
+check("some: empty source -> deny", decide({"tags": []}, some_admin), 0)
+
+every_admin = dict(some_admin, type="every")
+check("every: all match -> allow", decide({"tags": ["admin", "admin"]}, every_admin), 1)
+check("every: one mismatch -> deny", decide({"tags": ["admin", "guest"]}, every_admin), 0)
+check("every: vacuously true on empty -> allow", decide({"tags": []}, every_admin), 1)
+
+every_some = {
+    "type": "every",
+    "var": "required",
+    "source": {"type": "ref", "path": ["input", "required_perms"]},
+    "body": {
+        "type": "some",
+        "var": "granted",
+        "source": {"type": "ref", "path": ["input", "user", "perms"]},
+        "body": {
+            "type": "eq",
+            "left": {"type": "ref", "path": ["granted"]},
+            "right": {"type": "ref", "path": ["required"]},
+        },
+    },
+}
+check(
+    "every+some: user has every required perm -> allow",
+    decide({"required_perms": ["read", "write"], "user": {"perms": ["read", "write", "admin"]}}, every_some),
+    1,
+)
+check(
+    "every+some: missing one required perm -> deny",
+    decide({"required_perms": ["read", "delete"], "user": {"perms": ["read", "write"]}}, every_some),
+    0,
+)
+
+if failed:
+    print(f"\n{failed} test(s) failed", file=sys.stderr)
+    sys.exit(1)
+
+print("\nall tests passed")
