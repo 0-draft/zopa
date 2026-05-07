@@ -9,6 +9,11 @@ once the first stable tag ships.
 
 ## Unreleased
 
+## [0.1.0] - 2026-05-07
+
+First tagged release. Public surface (export names, AST schema,
+callback semantics) is still alpha and may change before 1.0.
+
 ### Added
 
 - Initial implementation: `wasm32-freestanding` build, ~50 KB
@@ -35,3 +40,5 @@ once the first stable tag ships.
 
 - README badges (CI, OpenSSF Scorecard) now resolve. They were left
   pointing at `kanywst/zopa` after the repo moved to `0-draft/zopa`.
+
+[0.1.0]: https://github.com/0-draft/zopa/releases/tag/v0.1.0
