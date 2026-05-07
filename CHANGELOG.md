@@ -27,9 +27,11 @@ once the first stable tag ships.
   proxy-wasm host buffer ownership conventions.
 - Integration tests in Node, wasmtime, and a real Envoy
   (`zig build test`, `test-wasmtime`, `test-envoy`).
-- Release pipeline: `v*` tag pushes trigger `.github/workflows/release.yml`,
-  which builds `zopa-<tag>.wasm` (`--release=small`), generates a
-  SHA-256 checksum, attests SLSA v1.0 build provenance via
-  `slsa-github-generator`, signs the wasm with cosign keyless, and
-  attaches all four artifacts (`.wasm`, `.sha256`, `.intoto.jsonl`,
-  `.sigstore.json`) to the GitHub Release with auto-generated notes.
+- Automated releases on `v*` tags with SLSA v1.0 build provenance and
+  cosign keyless signatures. Each release attaches `zopa-<tag>.wasm`,
+  `.sha256`, `.intoto.jsonl`, and `.sigstore.json`.
+
+### Fixed
+
+- README badges (CI, OpenSSF Scorecard) now resolve. They were left
+  pointing at `kanywst/zopa` after the repo moved to `0-draft/zopa`.
