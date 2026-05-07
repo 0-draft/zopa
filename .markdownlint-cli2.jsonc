@@ -1,0 +1,16 @@
+{
+  "config": {
+    "MD013": false,
+    "MD024": false,
+    "MD033": { "allowed_elements": ["picture", "source", "img"] },
+    "MD036": false,
+    "MD041": false
+  },
+  "globs": ["**/*.md"],
+  "ignores": [
+    ".venv-test/**",
+    ".zig-cache/**",
+    "zig-out/**",
+    "node_modules/**"
+  ]
+}

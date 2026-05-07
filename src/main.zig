@@ -1,0 +1,53 @@
+//! Wasm entry point.
+//!
+//! Two ABIs share this module:
+//!
+//! - proxy-wasm 0.2.1 lifecycle callbacks, defined in `proxy_wasm.zig`.
+//! - A generic `evaluate(input, ast)` for hosts that don't speak
+//!   proxy-wasm.
+//!
+//! Both use the `malloc` / `free` pair below for buffers that cross
+//! the boundary. `free` takes only a pointer; the length lives in a
+//! usize prefix in front of the payload.
+
+const std = @import("std");
+const memory = @import("memory.zig");
+const eval = @import("eval.zig");
+
+// Force the proxy-wasm module into the build graph. Without this
+// reference its `export fn` declarations never reach the wasm export
+// table.
+comptime {
+    _ = @import("proxy_wasm.zig");
+}
+
+/// Allocate `len` bytes in wasm linear memory and return the payload
+/// pointer. Returns 0 on OOM.
+export fn malloc(len: usize) ?[*]u8 {
+    return memory.hostMalloc(len);
+}
+
+/// Free a buffer previously returned by `malloc`.
+export fn free(ptr: [*]u8) void {
+    memory.hostFree(ptr);
+}
+
+/// Run one evaluation. Returns 1 (allow), 0 (deny), or -1 (error).
+///
+/// The arena reset in `defer` ensures every exit path -- success,
+/// deny, or error -- leaves the per-request arena empty.
+export fn evaluate(
+    input_ptr: [*]const u8,
+    input_len: usize,
+    ast_ptr: [*]const u8,
+    ast_len: usize,
+) i32 {
+    defer memory.resetRequestArena();
+
+    const arena = memory.requestArena();
+    const input = input_ptr[0..input_len];
+    const ast_bytes = ast_ptr[0..ast_len];
+
+    const decision = eval.evaluate(arena, input, ast_bytes) catch return -1;
+    return if (decision) 1 else 0;
+}
