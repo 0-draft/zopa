@@ -343,7 +343,9 @@ pub fn lookupPath(root: Value, path: []const []const u8) !Value {
     return cur;
 }
 
-fn lookupMember(members: []const Value.Member, key: []const u8) ?Value {
+/// First member with `key`, or `null` if none. Public so the AST
+/// builder can reuse it without a second copy.
+pub fn lookupMember(members: []const Value.Member, key: []const u8) ?Value {
     for (members) |m| {
         if (std.mem.eql(u8, m.key, key)) return m.value;
     }
@@ -388,7 +390,36 @@ fn arrayEqual(a: []const Value, b: []const Value) bool {
     return true;
 }
 
+// Maximum object width we can match without duplicate-key risk.
+// Real policy objects are tiny; widening just bumps the on-stack
+// bitmap size.
+const object_match_max: usize = 64;
+
 fn objectEqual(a: []const Value.Member, b: []const Value.Member) bool {
+    if (a.len != b.len) return false;
+    if (b.len > object_match_max) return objectEqualLinear(a, b);
+
+    // Match each entry of `a` against an unconsumed entry of `b`.
+    // A consumed-bitmap stops a duplicate key in `a` from matching
+    // the same `b` entry twice.
+    var consumed = [_]bool{false} ** object_match_max;
+    outer: for (a) |ea| {
+        for (b, 0..) |eb, i| {
+            if (consumed[i]) continue;
+            if (std.mem.eql(u8, ea.key, eb.key) and valueEquals(ea.value, eb.value)) {
+                consumed[i] = true;
+                continue :outer;
+            }
+        }
+        return false;
+    }
+    return true;
+}
+
+// Fallback for objects wider than `object_match_max`. Cannot
+// distinguish duplicate keys, but never allocates from inside the
+// equality helper.
+fn objectEqualLinear(a: []const Value.Member, b: []const Value.Member) bool {
     if (a.len != b.len) return false;
     outer: for (a) |ea| {
         for (b) |eb| {
@@ -400,10 +431,16 @@ fn objectEqual(a: []const Value.Member, b: []const Value.Member) bool {
     return true;
 }
 
+// Set equality is order- and multiplicity-insensitive: a ⊆ b ∧ b ⊆ a.
+// `[1] == [1, 1]` evaluates true, matching the contract in
+// `docs/ast.md`.
 fn setEqual(a: []const Value, b: []const Value) bool {
-    if (a.len != b.len) return false;
-    outer: for (a) |x| {
-        for (b) |y| if (valueEquals(x, y)) continue :outer;
+    return setSubsetOf(a, b) and setSubsetOf(b, a);
+}
+
+fn setSubsetOf(needle: []const Value, haystack: []const Value) bool {
+    outer: for (needle) |x| {
+        for (haystack) |y| if (valueEquals(x, y)) continue :outer;
         return false;
     }
     return true;

@@ -114,12 +114,12 @@ fn buildRule(allocator: std.mem.Allocator, node: Value) !Rule {
     if (!std.mem.eql(u8, t, "rule")) return error.InvalidRule;
 
     const name = try requireString(obj, "name");
-    const is_default = if (lookupMember(obj, "default")) |d|
+    const is_default = if (json.lookupMember(obj, "default")) |d|
         (d == .boolean and d.boolean)
     else
         false;
 
-    const body_slice: []const *const Expr = if (lookupMember(obj, "body")) |b_v| body: {
+    const body_slice: []const *const Expr = if (json.lookupMember(obj, "body")) |b_v| body: {
         if (b_v != .array) return error.InvalidRuleBody;
         const buf = try allocator.alloc(*const Expr, b_v.array.len);
         for (b_v.array, 0..) |item, i| {
@@ -128,7 +128,7 @@ fn buildRule(allocator: std.mem.Allocator, node: Value) !Rule {
         break :body buf;
     } else try allocator.alloc(*const Expr, 0);
 
-    const value_expr: ?*const Expr = if (lookupMember(obj, "value")) |v_v|
+    const value_expr: ?*const Expr = if (json.lookupMember(obj, "value")) |v_v|
         try buildExpr(allocator, v_v)
     else
         null;
@@ -208,15 +208,12 @@ pub fn buildExpr(allocator: std.mem.Allocator, node: Value) !*Expr {
     return expr;
 }
 
-// Object lookup helpers used by the builders.
-
-fn lookupMember(members: []const Value.Member, key: []const u8) ?Value {
-    for (members) |m| if (std.mem.eql(u8, m.key, key)) return m.value;
-    return null;
-}
+// Object lookup helpers used by the builders. `lookupMember` lives
+// in json.zig; these wrappers add the "must be present" / "must be
+// a string" shorthands the builders need.
 
 fn requireField(members: []const Value.Member, key: []const u8) !Value {
-    return lookupMember(members, key) orelse error.MissingField;
+    return json.lookupMember(members, key) orelse error.MissingField;
 }
 
 fn requireString(members: []const Value.Member, key: []const u8) ![]const u8 {

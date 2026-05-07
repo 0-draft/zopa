@@ -63,11 +63,16 @@ fn evalModule(module: ast.Module, target: []const u8, input: json.Value) !bool {
 
         if (rule.is_default) {
             if (rule.value) |vex| {
+                // Mirror the truthiness rule used for regular rules
+                // below: only `false` and `nil` are falsy; any other
+                // value (including non-booleans) is truthy.
                 const v = try resolveValue(vex, input, null, 0);
-                if (v == .boolean) {
-                    fallback = v.boolean;
-                    have_fallback = true;
-                }
+                fallback = switch (v) {
+                    .boolean => |b| b,
+                    .nil => false,
+                    else => true,
+                };
+                have_fallback = true;
             }
             continue;
         }
