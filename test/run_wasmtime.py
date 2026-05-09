@@ -238,6 +238,68 @@ check(
     0,
 )
 
+# ---------------------------------------------------------------------------
+# 8. call: builtin functions (startswith / endswith / contains / count)
+# ---------------------------------------------------------------------------
+check(
+    "call startswith on input.path -> allow",
+    decide({"path": "/admin/users"}, {
+        "type": "call", "name": "startswith",
+        "args": [
+            {"type": "ref", "path": ["input", "path"]},
+            {"type": "value", "value": "/admin/"},
+        ],
+    }),
+    1,
+)
+check(
+    "call startswith on input.path -> deny",
+    decide({"path": "/users"}, {
+        "type": "call", "name": "startswith",
+        "args": [
+            {"type": "ref", "path": ["input", "path"]},
+            {"type": "value", "value": "/admin/"},
+        ],
+    }),
+    0,
+)
+check(
+    "call endswith on host -> allow",
+    decide({"host": "api.internal"}, {
+        "type": "call", "name": "endswith",
+        "args": [
+            {"type": "ref", "path": ["input", "host"]},
+            {"type": "value", "value": ".internal"},
+        ],
+    }),
+    1,
+)
+check(
+    "call contains in user-agent -> allow",
+    decide({"ua": "Mozilla/5.0 Bot"}, {
+        "type": "call", "name": "contains",
+        "args": [
+            {"type": "ref", "path": ["input", "ua"]},
+            {"type": "value", "value": "Bot"},
+        ],
+    }),
+    1,
+)
+check(
+    "call count > 2 over array -> allow",
+    decide({"perms": ["r", "w", "x"]}, {
+        "type": "gt",
+        "left": {"type": "call", "name": "count", "args": [{"type": "ref", "path": ["input", "perms"]}]},
+        "right": {"type": "value", "value": 2},
+    }),
+    1,
+)
+check(
+    "call unknown builtin -> deny",
+    decide({}, {"type": "call", "name": "made_up_function", "args": [{"type": "value", "value": 1}]}),
+    0,
+)
+
 if failed:
     print(f"\n{failed} test(s) failed", file=sys.stderr)
     sys.exit(1)

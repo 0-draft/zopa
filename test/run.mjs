@@ -354,6 +354,75 @@ check(
   0,
 );
 
+// ---------------------------------------------------------------------------
+// 8. call: builtin functions (startswith / endswith / contains / count)
+// ---------------------------------------------------------------------------
+const callStartswith = (path, prefix) => ({
+  type: 'call', name: 'startswith',
+  args: [
+    { type: 'ref', path: ['input', 'path'] },
+    { type: 'value', value: prefix },
+  ],
+});
+check('call startswith on input.path -> allow', decide({ path: '/admin/users' }, callStartswith('path', '/admin/')), 1);
+check('call startswith on input.path -> deny',  decide({ path: '/users' },        callStartswith('path', '/admin/')), 0);
+
+check(
+  'call endswith on host -> allow',
+  decide({ host: 'api.internal' }, {
+    type: 'call', name: 'endswith',
+    args: [
+      { type: 'ref', path: ['input', 'host'] },
+      { type: 'value', value: '.internal' },
+    ],
+  }),
+  1,
+);
+
+check(
+  'call contains in user-agent -> allow',
+  decide({ ua: 'Mozilla/5.0 Bot' }, {
+    type: 'call', name: 'contains',
+    args: [
+      { type: 'ref', path: ['input', 'ua'] },
+      { type: 'value', value: 'Bot' },
+    ],
+  }),
+  1,
+);
+
+// count compared to a literal, used in body position.
+check(
+  'call count > 2 over array -> allow',
+  decide({ perms: ['r', 'w', 'x'] }, {
+    type: 'gt',
+    left: { type: 'call', name: 'count', args: [{ type: 'ref', path: ['input', 'perms'] }] },
+    right: { type: 'value', value: 2 },
+  }),
+  1,
+);
+check(
+  'call count > 2 over array -> deny',
+  decide({ perms: ['r'] }, {
+    type: 'gt',
+    left: { type: 'call', name: 'count', args: [{ type: 'ref', path: ['input', 'perms'] }] },
+    right: { type: 'value', value: 2 },
+  }),
+  0,
+);
+
+// unknown builtin: lookup miss resolves to .nil, treated as falsy in
+// body position -> the synthetic `allow` rule fails -> deny (0). The
+// proxy-wasm shim treats any non-1 the same way (deny).
+check(
+  'call unknown builtin -> deny',
+  decide({}, {
+    type: 'call', name: 'made_up_function',
+    args: [{ type: 'value', value: 1 }],
+  }),
+  0,
+);
+
 if (failed > 0) {
   console.error(`\n${failed} test(s) failed`);
   exit(1);
