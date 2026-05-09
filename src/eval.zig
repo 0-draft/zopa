@@ -12,6 +12,7 @@
 
 const std = @import("std");
 const ast = @import("ast.zig");
+const builtins = @import("builtins.zig");
 const json = @import("json.zig");
 
 /// Default rule name when the caller doesn't override it.
@@ -19,6 +20,10 @@ pub const default_target_rule: []const u8 = "allow";
 
 /// Recursion cap. See `docs/ast.md` for context.
 const max_eval_depth: u32 = 32;
+
+/// Stack-allocated buffer for builtin args. Larger calls fall back to
+/// `nil` (deny in body position). Bump if a future builtin needs more.
+const max_builtin_args: usize = 8;
 
 /// Explicit error set; needed because the recursive helpers form a
 /// cycle that the compiler can't infer through.
@@ -127,6 +132,11 @@ fn evalExprBool(
         .not => |inner| !(try evalExprBool(inner, input, scope, depth + 1)),
         .some => |it| try evalSome(it, input, scope, depth + 1),
         .every => |it| try evalEvery(it, input, scope, depth + 1),
+        .call => |c| switch (try evalCall(c, input, scope, depth + 1)) {
+            .boolean => |b| b,
+            .nil => false,
+            else => true,
+        },
     };
 }
 
@@ -221,7 +231,24 @@ fn resolveValue(
         .not => |inner| .{ .boolean = !(try evalExprBool(inner, input, scope, depth + 1)) },
         .some => |it| .{ .boolean = try evalSome(it, input, scope, depth + 1) },
         .every => |it| .{ .boolean = try evalEvery(it, input, scope, depth + 1) },
+        .call => |c| try evalCall(c, input, scope, depth + 1),
     };
+}
+
+fn evalCall(
+    c: ast.Expr.Call,
+    input: json.Value,
+    scope: ?*const Scope,
+    depth: u32,
+) HelperError!json.Value {
+    if (depth >= max_eval_depth) return error.EvalTooDeep;
+    if (c.args.len > max_builtin_args) return .nil;
+    const b = builtins.lookup(c.name) orelse return .nil;
+    var resolved: [max_builtin_args]json.Value = undefined;
+    for (c.args, 0..) |arg, i| {
+        resolved[i] = try resolveValue(arg, input, scope, depth + 1);
+    }
+    return builtins.dispatch(b, resolved[0..c.args.len]);
 }
 
 /// Resolve a ref. The first segment is matched against the scope
@@ -315,6 +342,32 @@ test "evaluate: default rule when no other rule matches" {
         "]}";
     try testing.expect(!(try run("{\"role\":\"guest\"}", policy)));
     try testing.expect(try run("{\"role\":\"admin\"}", policy));
+}
+
+test "evaluate: call startswith on input.path" {
+    const policy =
+        "{\"type\":\"call\",\"name\":\"startswith\",\"args\":[" ++
+        "{\"type\":\"ref\",\"path\":[\"input\",\"path\"]}," ++
+        "{\"type\":\"value\",\"value\":\"/admin/\"}]}";
+    try testing.expect(try run("{\"path\":\"/admin/users\"}", policy));
+    try testing.expect(!(try run("{\"path\":\"/users\"}", policy)));
+}
+
+test "evaluate: call count compared with gt" {
+    const policy =
+        "{\"type\":\"gt\"," ++
+        "\"left\":{\"type\":\"call\",\"name\":\"count\",\"args\":[" ++
+        "{\"type\":\"ref\",\"path\":[\"input\",\"perms\"]}]}," ++
+        "\"right\":{\"type\":\"value\",\"value\":2}}";
+    try testing.expect(try run("{\"perms\":[\"r\",\"w\",\"x\"]}", policy));
+    try testing.expect(!(try run("{\"perms\":[\"r\"]}", policy)));
+}
+
+test "evaluate: unknown builtin denies" {
+    const policy =
+        "{\"type\":\"call\",\"name\":\"made_up_fn\",\"args\":[" ++
+        "{\"type\":\"value\",\"value\":1}]}";
+    try testing.expect(!(try run("{}", policy)));
 }
 
 test "evaluate: every+some over arrays" {

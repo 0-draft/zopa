@@ -40,6 +40,7 @@ pub const Expr = union(enum) {
     not: *const Expr,
     some: Iter,
     every: Iter,
+    call: Call,
 
     pub const Compare = struct {
         op: CompareOp,
@@ -54,6 +55,13 @@ pub const Expr = union(enum) {
         var_name: []const u8,
         source: *const Expr,
         body: *const Expr,
+    };
+
+    /// Call to a builtin function. The evaluator looks `name` up in
+    /// `builtins.zig`; unknown names error out (treated as deny).
+    pub const Call = struct {
+        name: []const u8,
+        args: []const *const Expr,
     };
 };
 
@@ -201,6 +209,15 @@ pub fn buildExpr(allocator: std.mem.Allocator, node: Value) !*Expr {
             .{ .some = iter }
         else
             .{ .every = iter };
+    } else if (std.mem.eql(u8, t, "call")) {
+        const name = try requireString(obj, "name");
+        const args_v = try requireField(obj, "args");
+        if (args_v != .array) return error.InvalidArgs;
+        const args = try allocator.alloc(*const Expr, args_v.array.len);
+        for (args_v.array, 0..) |item, i| {
+            args[i] = try buildExpr(allocator, item);
+        }
+        expr.* = .{ .call = .{ .name = name, .args = args } };
     } else {
         return error.UnknownExprType;
     }
