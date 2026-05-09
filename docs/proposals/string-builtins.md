@@ -41,14 +41,14 @@ imports.
 
 1. Initial set of builtins (Rego-compatible names and arities):
 
-   | Name           | Arity | Args                | Returns                    |
-   | -------------- | ----- | ------------------- | -------------------------- |
-   | `startswith`   | 2     | (string, string)    | boolean                    |
-   | `endswith`     | 2     | (string, string)    | boolean                    |
-   | `contains`     | 2     | (string, string)    | boolean                    |
-   | `count`        | 1     | (array \| set \| object \| string) | number |
-   | `lower`        | 1     | (string)            | string                     |
-   | `upper`        | 1     | (string)            | string                     |
+   | Name         | Arity | Args                         | Returns |
+   | ------------ | ----- | ---------------------------- | ------- |
+   | `startswith` | 2     | (string, string)             | boolean |
+   | `endswith`   | 2     | (string, string)             | boolean |
+   | `contains`   | 2     | (string, string)             | boolean |
+   | `count`      | 1     | (array, set, object, string) | number  |
+   | `lower`      | 1     | (string)                     | string  |
+   | `upper`      | 1     | (string)                     | string  |
 
    `lower` / `upper` are tentative (case-insensitive comparisons are a
    common ask). Lock the v1 set in the PR review before

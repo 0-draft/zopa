@@ -7,6 +7,7 @@
 //! `main.zig`.
 
 pub const ast = @import("ast.zig");
+pub const builtins = @import("builtins.zig");
 pub const eval = @import("eval.zig");
 pub const json = @import("json.zig");
 pub const memory = @import("memory.zig");
@@ -23,6 +24,7 @@ test {
     const testing = @import("std").testing;
     testing.refAllDecls(@This());
     _ = ast;
+    _ = builtins;
     _ = eval;
     _ = json;
 }
