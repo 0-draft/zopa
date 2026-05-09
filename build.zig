@@ -98,4 +98,15 @@ pub fn build(b: *std.Build) void {
     test_all_step.dependOn(&node_run.step);
     test_all_step.dependOn(&wasmtime_run.step);
     test_all_step.dependOn(&envoy_run.step);
+
+    // `zig build bench` -> Node-based latency benchmark of the
+    // `evaluate` hot path. zopa-only for v1; cross-engine numbers
+    // are deferred until OPA conformance lands. See bench/README.md.
+    const bench_run = b.addSystemCommand(&.{ "node", "bench/run.mjs" });
+    bench_run.step.dependOn(b.getInstallStep());
+    const bench_step = b.step(
+        "bench",
+        "Run zopa.wasm latency benchmark in Node.js",
+    );
+    bench_step.dependOn(&bench_run.step);
 }

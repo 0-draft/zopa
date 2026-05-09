@@ -1,0 +1,12 @@
+{
+  "name":  "02_header_eq",
+  "input": { "method": "GET" },
+  "ast": {
+    "type": "compare",
+    "op":   "eq",
+    "left":  { "type": "ref",   "path": ["input", "method"] },
+    "right": { "type": "value", "value": "GET" }
+  },
+  "rego":  "package authz\n\nallow if input.method == \"GET\"\n",
+  "cedar": "permit(principal, action == Action::\"GET\", resource);"
+}
