@@ -196,6 +196,23 @@ def walk_term(term: dict[str, Any]) -> dict[str, Any]:
     if t == "array":
         return {"type": "value", "value": [walk_term_as_jsonvalue(x) for x in term["value"]]}
 
+    if t == "set":
+        # zopa's `set` AST node carries plain JSON values as items.
+        return {"type": "set", "items": [walk_term_as_jsonvalue(x) for x in term["value"]]}
+
+    if t == "object":
+        # OPA encodes object literals as a list of [key_term, value_term]
+        # pairs. zopa's Value.object requires string keys.
+        members: dict[str, Any] = {}
+        for pair in term["value"]:
+            key_term, val_term = pair
+            if key_term.get("type") != "string":
+                raise Unsupported(
+                    f"object literal with non-string key (type={key_term.get('type')})"
+                )
+            members[key_term["value"]] = walk_term_as_jsonvalue(val_term)
+        return {"type": "value", "value": members}
+
     if t == "call":
         return walk_call_form(term["value"])
 
@@ -212,12 +229,27 @@ def walk_term_as_value(term: dict[str, Any]) -> dict[str, Any]:
 
 def walk_term_as_jsonvalue(term: dict[str, Any]) -> Any:
     """Walk a term that's known to be a literal JSON value (e.g.
-    inside an array literal)."""
+    inside an array / set literal, or an object value)."""
     t = term["type"]
     if t in ("boolean", "number", "string", "null"):
         return term["value"]
     if t == "array":
         return [walk_term_as_jsonvalue(x) for x in term["value"]]
+    if t == "set":
+        # JSON has no native set; flatten to a list. The outer caller
+        # decides what to do with it. zopa's `set` AST node is built
+        # via `walk_term` (above), not here.
+        return [walk_term_as_jsonvalue(x) for x in term["value"]]
+    if t == "object":
+        out: dict[str, Any] = {}
+        for pair in term["value"]:
+            key_term, val_term = pair
+            if key_term.get("type") != "string":
+                raise Unsupported(
+                    f"object literal with non-string key (type={key_term.get('type')})"
+                )
+            out[key_term["value"]] = walk_term_as_jsonvalue(val_term)
+        return out
     raise Unsupported(f"non-literal term {t} inside array literal")
 
 

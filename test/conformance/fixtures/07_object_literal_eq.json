@@ -1,0 +1,9 @@
+{
+  "name":  "object_literal_eq",
+  "rego":  "package authz\n\nallow if input.config == {\"theme\": \"dark\"}\n",
+  "cases": [
+    { "input": { "config": { "theme": "dark" } },  "expected": 1 },
+    { "input": { "config": { "theme": "light" } }, "expected": 0 },
+    { "input": { "config": {} },                    "expected": 0 }
+  ]
+}
