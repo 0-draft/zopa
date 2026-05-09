@@ -53,9 +53,10 @@ export fn evaluate(
 }
 
 /// Run one evaluation against an explicit target rule. Same return
-/// codes as `evaluate`. Hosts that want to drive the response-side
-/// "allow_response" path (or any other target name) call this
-/// instead of the default `evaluate`.
+/// codes as `evaluate`. Hosts that want to drive a non-default rule
+/// (`allow_response` for the response phase, `allow_body` for the
+/// body phase, or any other target name) call this instead of the
+/// default `evaluate`.
 export fn evaluate_target(
     input_ptr: [*]const u8,
     input_len: usize,

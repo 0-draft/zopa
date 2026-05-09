@@ -460,6 +460,67 @@ check(
     0,
 )
 
+# ---------------------------------------------------------------------------
+# 12. evaluate_target: body-side rules via the explicit-target export.
+# ---------------------------------------------------------------------------
+body_policy = {
+    "type": "module",
+    "rules": [
+        {"type": "rule", "name": "allow_body", "default": True, "value": {"type": "value", "value": True}},
+        {
+            "type": "rule",
+            "name": "allow_body",
+            "body": [
+                {
+                    "type": "gt",
+                    "left": {"type": "ref", "path": ["input", "body", "amount"]},
+                    "right": {"type": "value", "value": 1000},
+                }
+            ],
+            "value": {"type": "value", "value": False},
+        },
+    ],
+}
+check(
+    "evaluate_target allow_body: amount over limit -> deny",
+    decide_target({"body": {"amount": 5000}, "body_raw": "{\"amount\":5000}"}, body_policy, "allow_body"),
+    0,
+)
+check(
+    "evaluate_target allow_body: amount under limit -> allow",
+    decide_target({"body": {"amount": 50}, "body_raw": "{\"amount\":50}"}, body_policy, "allow_body"),
+    1,
+)
+
+raw_policy = {
+    "type": "module",
+    "rules": [
+        {
+            "type": "rule",
+            "name": "allow_body",
+            "body": [
+                {
+                    "type": "eq",
+                    "left": {"type": "ref", "path": ["input", "body_raw"]},
+                    "right": {"type": "value", "value": "BLOCKED"},
+                }
+            ],
+            "value": {"type": "value", "value": False},
+        },
+        {"type": "rule", "name": "allow_body", "default": True, "value": {"type": "value", "value": True}},
+    ],
+}
+check(
+    "evaluate_target allow_body: body_raw=BLOCKED -> deny",
+    decide_target({"body": None, "body_raw": "BLOCKED"}, raw_policy, "allow_body"),
+    0,
+)
+check(
+    "evaluate_target allow_body: body_raw=ok -> allow",
+    decide_target({"body": None, "body_raw": "ok"}, raw_policy, "allow_body"),
+    1,
+)
+
 if failed:
     print(f"\n{failed} test(s) failed", file=sys.stderr)
     sys.exit(1)

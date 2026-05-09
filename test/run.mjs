@@ -605,6 +605,73 @@ check(
   0,
 );
 
+// ---------------------------------------------------------------------------
+// 12. evaluate_target: body-side rules driven via the new export.
+//
+// proxy_on_request_body in proxy_wasm.zig fires the "allow_body"
+// target rule against {body, body_raw}. The generic evaluate_target
+// export lets hosts reach the same eval path without proxy-wasm.
+// ---------------------------------------------------------------------------
+const bodyPolicy = {
+  type: 'module',
+  rules: [
+    { type: 'rule', name: 'allow_body', default: true, value: { type: 'value', value: true } },
+    {
+      type: 'rule',
+      name: 'allow_body',
+      body: [
+        {
+          type: 'gt',
+          left: { type: 'ref', path: ['input', 'body', 'amount'] },
+          right: { type: 'value', value: 1000 },
+        },
+      ],
+      value: { type: 'value', value: false },
+    },
+  ],
+};
+check(
+  'evaluate_target allow_body: amount over limit -> deny',
+  decideTarget({ body: { amount: 5000 }, body_raw: '{"amount":5000}' }, bodyPolicy, 'allow_body'),
+  0,
+);
+check(
+  'evaluate_target allow_body: amount under limit -> allow',
+  decideTarget({ body: { amount: 50 }, body_raw: '{"amount":50}' }, bodyPolicy, 'allow_body'),
+  1,
+);
+
+// body_raw fallback: policies can match on the raw bytes when the
+// body did not parse as JSON.
+const rawPolicy = {
+  type: 'module',
+  rules: [
+    {
+      type: 'rule',
+      name: 'allow_body',
+      body: [
+        {
+          type: 'eq',
+          left: { type: 'ref', path: ['input', 'body_raw'] },
+          right: { type: 'value', value: 'BLOCKED' },
+        },
+      ],
+      value: { type: 'value', value: false },
+    },
+    { type: 'rule', name: 'allow_body', default: true, value: { type: 'value', value: true } },
+  ],
+};
+check(
+  'evaluate_target allow_body: body_raw=BLOCKED -> deny',
+  decideTarget({ body: null, body_raw: 'BLOCKED' }, rawPolicy, 'allow_body'),
+  0,
+);
+check(
+  'evaluate_target allow_body: body_raw=ok -> allow',
+  decideTarget({ body: null, body_raw: 'ok' }, rawPolicy, 'allow_body'),
+  1,
+);
+
 if (failed > 0) {
   console.error(`\n${failed} test(s) failed`);
   exit(1);
