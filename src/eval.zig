@@ -43,18 +43,50 @@ const Scope = struct {
 
 /// Run a single evaluation. `arena` must already be initialised; this
 /// function neither inits nor resets it -- that is the caller's job.
+///
+/// Targets the default package ("") and the default rule ("allow").
+/// Use `evaluateAddressed` to dispatch into a specific `package.rule`
+/// pair within a `{"type":"modules", ...}` bundle.
 pub fn evaluate(
     arena: *std.heap.ArenaAllocator,
     input_json: []const u8,
     ast_json: []const u8,
 ) !bool {
+    return evaluateAddressed(arena, input_json, ast_json, "", default_target_rule);
+}
+
+/// Run a single evaluation against `target_package.target_rule`. The
+/// AST source can be either a single module or a `Modules` bundle;
+/// the legacy single-module form is treated as `package = ""`.
+pub fn evaluateAddressed(
+    arena: *std.heap.ArenaAllocator,
+    input_json: []const u8,
+    ast_json: []const u8,
+    target_package: []const u8,
+    target_rule: []const u8,
+) !bool {
     const allocator = arena.allocator();
 
     const input_value = try json.parse(allocator, input_json);
     const ast_value = try json.parse(allocator, ast_json);
-    const module = try ast.buildModule(allocator, ast_value);
+    const bundle = try ast.buildModulesBundle(allocator, ast_value);
 
-    return evalModule(module, default_target_rule, input_value);
+    return evalBundle(bundle, target_package, target_rule, input_value);
+}
+
+/// OR-combine evalModule across every module whose package matches.
+/// Empty match set returns `false` (deny by default).
+fn evalBundle(
+    bundle: ast.Modules,
+    target_package: []const u8,
+    target_rule: []const u8,
+    input: json.Value,
+) !bool {
+    for (bundle.modules) |module| {
+        if (!std.mem.eql(u8, module.package, target_package)) continue;
+        if (try evalModule(module, target_rule, input)) return true;
+    }
+    return false;
 }
 
 /// Walk every rule named `target`. A `default` rule's value becomes
@@ -450,6 +482,72 @@ test "evaluate: every over object defaults to keys" {
         "\"right\":{\"type\":\"value\",\"value\":\"banned\"}}}";
     try testing.expect(try run("{\"m\":{\"x\":1,\"y\":2}}", policy));
     try testing.expect(!(try run("{\"m\":{\"x\":1,\"banned\":2}}", policy)));
+}
+
+fn runAddressed(input: []const u8, ast_src: []const u8, pkg: []const u8, rule: []const u8) !bool {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    return evaluateAddressed(&arena, input, ast_src, pkg, rule);
+}
+
+test "modules bundle: address authz.allow vs audit.allow" {
+    const policy =
+        "{\"type\":\"modules\",\"modules\":[" ++
+        "{\"type\":\"module\",\"package\":\"authz\",\"rules\":[" ++
+        "{\"type\":\"rule\",\"name\":\"allow\",\"body\":[" ++
+        "{\"type\":\"eq\"," ++
+        "\"left\":{\"type\":\"ref\",\"path\":[\"input\",\"role\"]}," ++
+        "\"right\":{\"type\":\"value\",\"value\":\"admin\"}}]}]}," ++
+        "{\"type\":\"module\",\"package\":\"audit\",\"rules\":[" ++
+        "{\"type\":\"rule\",\"name\":\"allow\",\"body\":[" ++
+        "{\"type\":\"value\",\"value\":true}]}]}" ++
+        "]}";
+
+    // authz.allow fires only on admin.
+    try testing.expect(try runAddressed("{\"role\":\"admin\"}", policy, "authz", "allow"));
+    try testing.expect(!(try runAddressed("{\"role\":\"guest\"}", policy, "authz", "allow")));
+
+    // audit.allow always fires regardless of role.
+    try testing.expect(try runAddressed("{\"role\":\"guest\"}", policy, "audit", "allow"));
+}
+
+test "modules bundle: missing package -> deny" {
+    const policy =
+        "{\"type\":\"modules\",\"modules\":[" ++
+        "{\"type\":\"module\",\"package\":\"authz\",\"rules\":[" ++
+        "{\"type\":\"rule\",\"name\":\"allow\",\"body\":[" ++
+        "{\"type\":\"value\",\"value\":true}]}]}" ++
+        "]}";
+    try testing.expect(!(try runAddressed("{}", policy, "missing", "allow")));
+}
+
+test "modules bundle: bare module wraps as package='' (backwards compat)" {
+    const policy =
+        "{\"type\":\"module\",\"rules\":[" ++
+        "{\"type\":\"rule\",\"name\":\"allow\",\"body\":[" ++
+        "{\"type\":\"value\",\"value\":true}]}]}";
+    try testing.expect(try runAddressed("{}", policy, "", "allow"));
+    // Same module via the default `evaluate` entry must still allow.
+    try testing.expect(try run("{}", policy));
+}
+
+test "modules bundle: OR across two modules in same package" {
+    const policy =
+        "{\"type\":\"modules\",\"modules\":[" ++
+        "{\"type\":\"module\",\"package\":\"authz\",\"rules\":[" ++
+        "{\"type\":\"rule\",\"name\":\"allow\",\"body\":[" ++
+        "{\"type\":\"eq\"," ++
+        "\"left\":{\"type\":\"ref\",\"path\":[\"input\",\"role\"]}," ++
+        "\"right\":{\"type\":\"value\",\"value\":\"admin\"}}]}]}," ++
+        "{\"type\":\"module\",\"package\":\"authz\",\"rules\":[" ++
+        "{\"type\":\"rule\",\"name\":\"allow\",\"body\":[" ++
+        "{\"type\":\"eq\"," ++
+        "\"left\":{\"type\":\"ref\",\"path\":[\"input\",\"role\"]}," ++
+        "\"right\":{\"type\":\"value\",\"value\":\"editor\"}}]}]}" ++
+        "]}";
+    try testing.expect(try runAddressed("{\"role\":\"admin\"}", policy, "authz", "allow"));
+    try testing.expect(try runAddressed("{\"role\":\"editor\"}", policy, "authz", "allow"));
+    try testing.expect(!(try runAddressed("{\"role\":\"guest\"}", policy, "authz", "allow")));
 }
 
 test "evaluate: every+some over arrays" {

@@ -487,6 +487,69 @@ check(
   0,
 );
 
+// ---------------------------------------------------------------------------
+// 10. modules bundle: package addressing
+//
+// The default `evaluate` ABI targets package="" + rule="allow", so a
+// bare module wrapped at the top level keeps working. A modules
+// bundle with package="" still answers via the default entry point.
+// (Cross-package addressing is exercised by zig build test-unit.)
+// ---------------------------------------------------------------------------
+const wrappedModule = {
+  type: 'modules',
+  modules: [
+    {
+      type: 'module',
+      package: '',
+      rules: [
+        {
+          type: 'rule',
+          name: 'allow',
+          body: [
+            { type: 'eq', left: refRole, right: { type: 'value', value: 'admin' } },
+          ],
+        },
+      ],
+    },
+  ],
+};
+check('modules bundle: empty package -> allow when admin',  decide({ user: { role: 'admin' } },  wrappedModule), 1);
+check('modules bundle: empty package -> deny when guest',   decide({ user: { role: 'guest' } },  wrappedModule), 0);
+
+// Bundle with two packages: the default ABI only sees the empty-package
+// module. The "audit" module is invisible from the default entry.
+const twoPackages = {
+  type: 'modules',
+  modules: [
+    {
+      type: 'module',
+      package: '',
+      rules: [
+        {
+          type: 'rule',
+          name: 'allow',
+          body: [
+            { type: 'eq', left: refRole, right: { type: 'value', value: 'admin' } },
+          ],
+        },
+      ],
+    },
+    {
+      type: 'module',
+      package: 'audit',
+      rules: [
+        {
+          type: 'rule',
+          name: 'allow',
+          body: [{ type: 'value', value: true }],
+        },
+      ],
+    },
+  ],
+};
+check('modules bundle: default entry picks empty package', decide({ user: { role: 'admin' } }, twoPackages), 1);
+check('modules bundle: audit module invisible from default entry', decide({ user: { role: 'guest' } }, twoPackages), 0);
+
 if (failed > 0) {
   console.error(`\n${failed} test(s) failed`);
   exit(1);
