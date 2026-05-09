@@ -4,8 +4,9 @@
 //! `proxy_on_context_create`, `proxy_on_request_headers`,
 //! `proxy_on_request_body`, `proxy_on_response_headers`,
 //! `proxy_on_done`. Request headers fire the "allow" target rule;
+//! request body fires "allow_body" with `{"body": <parsed-json>,
+//! "body_raw": <string>}` once the host signals end of stream;
 //! response headers fire "allow_response" with `{"response":{...}}`.
-//! Body callbacks are no-ops; see ROADMAP.md.
 //!
 //! Configuration: the policy AST JSON arrives via
 //! `proxy_on_configure`. We copy it into `host_allocator` so it
@@ -16,8 +17,9 @@
 //! `malloc`. We `hostFree` them once consumed.
 
 const std = @import("std");
-const memory = @import("memory.zig");
 const eval = @import("eval.zig");
+const json = @import("json.zig");
+const memory = @import("memory.zig");
 
 // ABI version negotiation: one empty export per supported version.
 
@@ -144,10 +146,86 @@ export fn proxy_on_request_headers(_: i32, _: i32, _: i32) i32 {
     return action_continue;
 }
 
-/// No-op for now. Keeps the symbol resolvable when the filter
-/// declares body interest.
-export fn proxy_on_request_body(_: i32, _: i32, _: i32) i32 {
+/// Evaluate against the request body once the host signals end of
+/// stream. Until then we return `Continue` so streaming chunks pass
+/// through; the final fragment triggers the eval. Body input shape
+/// is `{"body": <parsed-or-null>, "body_raw": <string>}`.
+///
+/// Hosts clear `:method` / `:path` from the header map by the time
+/// this fires (Envoy/wamr behaviour), so a body rule that needs
+/// header context must depend on a snapshot taken in
+/// `proxy_on_request_headers`. Per-context snapshot plumbing is
+/// tracked in ROADMAP.md; v1 surfaces only the body itself.
+export fn proxy_on_request_body(_: i32, body_size: i32, end_of_stream: i32) i32 {
+    if (end_of_stream == 0) return action_continue;
+    if (body_size <= 0) return action_continue;
+    const policy = configured_policy orelse return action_continue;
+    if (!evaluateBodyAt(@intCast(body_size), policy)) {
+        denyWithStatus(403);
+        return action_pause;
+    }
     return action_continue;
+}
+
+const body_target_rule: []const u8 = "allow_body";
+const max_body_bytes: usize = 64 * 1024;
+
+fn evaluateBodyAt(body_size: usize, policy: []const u8) bool {
+    const arena = memory.requestArena();
+    defer memory.resetRequestArena();
+    const allocator = arena.allocator();
+
+    const cap = if (body_size > max_body_bytes) max_body_bytes else body_size;
+    const body_bytes = readBodyBytes(allocator, cap) catch return false;
+    const input_bytes = buildBodyInput(allocator, body_bytes) catch return false;
+    return eval.evaluateWithTarget(arena, input_bytes, policy, body_target_rule) catch false;
+}
+
+/// Pull the request body from the host. Returns an empty slice on
+/// host error so the caller sees a body of "" rather than failing
+/// the request outright.
+fn readBodyBytes(allocator: std.mem.Allocator, cap: usize) ![]const u8 {
+    var data: ?[*]u8 = null;
+    var data_size: usize = 0;
+    const status = proxy_get_buffer_bytes(
+        buffer_type_http_request_body,
+        0,
+        cap,
+        &data,
+        &data_size,
+    );
+    if (status != status_ok) return &[_]u8{};
+    if (data_size == 0) return &[_]u8{};
+    const ptr = data orelse return &[_]u8{};
+    defer memory.hostFree(ptr);
+    return try allocator.dupe(u8, ptr[0..data_size]);
+}
+
+/// Build `{"body": <parsed-json-or-null>, "body_raw": <string>}`. We
+/// try to parse the body as JSON; if it fails, `body` is null and
+/// the policy can still match against `body_raw` (e.g. with the
+/// `contains` builtin). The parsed copy is dropped on the next
+/// arena reset, so this only costs one transient walk.
+fn buildBodyInput(allocator: std.mem.Allocator, body: []const u8) ![]u8 {
+    const parsed_ok = blk: {
+        _ = json.parse(allocator, body) catch break :blk false;
+        break :blk true;
+    };
+
+    var buf: std.ArrayList(u8) = .empty;
+    defer buf.deinit(allocator);
+
+    try buf.appendSlice(allocator, "{\"body\":");
+    if (parsed_ok and body.len > 0) {
+        try buf.appendSlice(allocator, body);
+    } else {
+        try buf.appendSlice(allocator, "null");
+    }
+    try buf.appendSlice(allocator, ",\"body_raw\":");
+    try appendJsonString(allocator, &buf, body);
+    try buf.append(allocator, '}');
+
+    return try allocator.dupe(u8, buf.items);
 }
 
 /// Evaluate against response status + headers under the

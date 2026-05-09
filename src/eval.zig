@@ -46,9 +46,9 @@ const Scope = struct {
 ///
 /// Targets the default package ("") and the default rule ("allow").
 /// Use `evaluateWithTarget` to pick a non-default rule (e.g.
-/// "allow_response"), or `evaluateAddressed` to dispatch into a
-/// specific `package.rule` pair within a `{"type":"modules", ...}`
-/// bundle.
+/// "allow_response" or "allow_body"), or `evaluateAddressed` to
+/// dispatch into a specific `package.rule` pair within a
+/// `{"type":"modules", ...}` bundle.
 pub fn evaluate(
     arena: *std.heap.ArenaAllocator,
     input_json: []const u8,
@@ -58,9 +58,10 @@ pub fn evaluate(
 }
 
 /// Run a single evaluation against `target_rule` in the default
-/// package (""). Used by the proxy-wasm shim to route the
-/// response-phase callback to the `allow_response` rule while
-/// keeping the request-phase on `allow`.
+/// package (""). Used by the proxy-wasm shim to route phase-specific
+/// callbacks: `allow_response` for the response phase and
+/// `allow_body` for the body phase, while the request-headers phase
+/// stays on `allow`.
 pub fn evaluateWithTarget(
     arena: *std.heap.ArenaAllocator,
     input_json: []const u8,
@@ -610,6 +611,58 @@ test "evaluateWithTarget: missing target rule -> deny" {
 test "evaluateWithTarget: allow target preserves default behaviour" {
     const policy = "{\"type\":\"value\",\"value\":true}";
     try testing.expect(try runWithTarget("{}", policy, "allow"));
+}
+
+test "evaluateWithTarget: allow_body fires on amount > limit" {
+    const policy =
+        "{\"type\":\"module\",\"rules\":[" ++
+        "{\"type\":\"rule\",\"name\":\"allow_body\",\"default\":true," ++
+        "\"value\":{\"type\":\"value\",\"value\":true}}," ++
+        "{\"type\":\"rule\",\"name\":\"allow_body\",\"body\":[" ++
+        "{\"type\":\"gt\"," ++
+        "\"left\":{\"type\":\"ref\",\"path\":[\"input\",\"body\",\"amount\"]}," ++
+        "\"right\":{\"type\":\"value\",\"value\":1000}}]," ++
+        "\"value\":{\"type\":\"value\",\"value\":false}}" ++
+        "]}";
+
+    // Body amount over limit -> rule fires returning false -> deny.
+    try testing.expect(!(try runWithTarget(
+        "{\"body\":{\"amount\":5000},\"body_raw\":\"...\"}",
+        policy,
+        "allow_body",
+    )));
+
+    // Body amount under limit -> default rule wins -> allow.
+    try testing.expect(try runWithTarget(
+        "{\"body\":{\"amount\":50},\"body_raw\":\"...\"}",
+        policy,
+        "allow_body",
+    ));
+}
+
+test "evaluateWithTarget: body_raw fallback when body parse fails" {
+    // Policy targets body_raw directly so a non-JSON body is still
+    // policy-checkable.
+    const policy =
+        "{\"type\":\"module\",\"rules\":[" ++
+        "{\"type\":\"rule\",\"name\":\"allow_body\",\"body\":[" ++
+        "{\"type\":\"eq\"," ++
+        "\"left\":{\"type\":\"ref\",\"path\":[\"input\",\"body_raw\"]}," ++
+        "\"right\":{\"type\":\"value\",\"value\":\"BLOCKED\"}}]," ++
+        "\"value\":{\"type\":\"value\",\"value\":false}}," ++
+        "{\"type\":\"rule\",\"name\":\"allow_body\",\"default\":true," ++
+        "\"value\":{\"type\":\"value\",\"value\":true}}" ++
+        "]}";
+    try testing.expect(!(try runWithTarget(
+        "{\"body\":null,\"body_raw\":\"BLOCKED\"}",
+        policy,
+        "allow_body",
+    )));
+    try testing.expect(try runWithTarget(
+        "{\"body\":null,\"body_raw\":\"ok\"}",
+        policy,
+        "allow_body",
+    ));
 }
 
 test "evaluate: every+some over arrays" {
