@@ -165,8 +165,35 @@ fn evalCompare(
     };
 }
 
+/// Iterator handle returned by `iterItems`. Avoids allocating a
+/// projected `Value` slice for object iteration; the consumer reads
+/// elements through `len()` and `at()`.
+const ItemIter = union(enum) {
+    none,
+    flat: []const json.Value,
+    object_keys: []const json.Value.Member,
+    object_values: []const json.Value.Member,
+
+    fn len(self: ItemIter) usize {
+        return switch (self) {
+            .none => 0,
+            .flat => |xs| xs.len,
+            .object_keys, .object_values => |members| members.len,
+        };
+    }
+
+    fn at(self: ItemIter, i: usize) json.Value {
+        return switch (self) {
+            .none => unreachable,
+            .flat => |xs| xs[i],
+            .object_keys => |members| .{ .string = members[i].key },
+            .object_values => |members| members[i].value,
+        };
+    }
+};
+
 /// `some x in source: body`. True if the body holds for at least
-/// one binding.
+/// one binding. A non-iterable source yields `false`.
 fn evalSome(
     it: ast.Expr.Iter,
     input: json.Value,
@@ -174,15 +201,18 @@ fn evalSome(
     depth: u32,
 ) HelperError!bool {
     if (depth >= max_eval_depth) return error.EvalTooDeep;
-    const items = try iterItems(it.source, input, scope, depth + 1) orelse return false;
-    for (items) |item| {
-        const child = Scope{ .parent = scope, .name = it.var_name, .bound = item };
+    const items = try iterItems(it.source, it.kind, input, scope, depth + 1);
+    if (items == .none) return false;
+    var i: usize = 0;
+    while (i < items.len()) : (i += 1) {
+        const child = Scope{ .parent = scope, .name = it.var_name, .bound = items.at(i) };
         if (try evalExprBool(it.body, input, &child, depth + 1)) return true;
     }
     return false;
 }
 
-/// `every x in source: body`. Vacuously true on an empty source.
+/// `every x in source: body`. Vacuously true on an empty or
+/// non-iterable source.
 fn evalEvery(
     it: ast.Expr.Iter,
     input: json.Value,
@@ -190,27 +220,34 @@ fn evalEvery(
     depth: u32,
 ) HelperError!bool {
     if (depth >= max_eval_depth) return error.EvalTooDeep;
-    const items = try iterItems(it.source, input, scope, depth + 1) orelse return true;
-    for (items) |item| {
-        const child = Scope{ .parent = scope, .name = it.var_name, .bound = item };
+    const items = try iterItems(it.source, it.kind, input, scope, depth + 1);
+    if (items == .none) return true;
+    var i: usize = 0;
+    while (i < items.len()) : (i += 1) {
+        const child = Scope{ .parent = scope, .name = it.var_name, .bound = items.at(i) };
         if (!try evalExprBool(it.body, input, &child, depth + 1)) return false;
     }
     return true;
 }
 
-/// Pull iterable items out of `source`. Returns `null` for
+/// Resolve `source` to an iterable view. Returns `.none` for
 /// non-iterable values; the caller decides the default.
 fn iterItems(
     source: *const ast.Expr,
+    kind: ast.Expr.IterKind,
     input: json.Value,
     scope: ?*const Scope,
     depth: u32,
-) HelperError!?[]const json.Value {
+) HelperError!ItemIter {
     const v = try resolveValue(source, input, scope, depth);
     return switch (v) {
-        .array => |xs| xs,
-        .set => |xs| xs,
-        else => null,
+        .array => |xs| .{ .flat = xs },
+        .set => |xs| .{ .flat = xs },
+        .object => |members| switch (kind) {
+            .keys => .{ .object_keys = members },
+            .values => .{ .object_values = members },
+        },
+        else => .none,
     };
 }
 
@@ -368,6 +405,51 @@ test "evaluate: unknown builtin denies" {
         "{\"type\":\"call\",\"name\":\"made_up_fn\",\"args\":[" ++
         "{\"type\":\"value\",\"value\":1}]}";
     try testing.expect(!(try run("{}", policy)));
+}
+
+test "evaluate: every over object keys" {
+    const policy =
+        "{\"type\":\"every\",\"var\":\"k\",\"kind\":\"keys\"," ++
+        "\"source\":{\"type\":\"ref\",\"path\":[\"input\",\"attrs\"]}," ++
+        "\"body\":{\"type\":\"neq\"," ++
+        "\"left\":{\"type\":\"ref\",\"path\":[\"k\"]}," ++
+        "\"right\":{\"type\":\"value\",\"value\":\"internal\"}}}";
+    try testing.expect(try run(
+        "{\"attrs\":{\"team\":\"sre\",\"region\":\"us-east\"}}",
+        policy,
+    ));
+    try testing.expect(!(try run(
+        "{\"attrs\":{\"team\":\"sre\",\"internal\":\"yes\"}}",
+        policy,
+    )));
+}
+
+test "evaluate: some over object values" {
+    const policy =
+        "{\"type\":\"some\",\"var\":\"v\",\"kind\":\"values\"," ++
+        "\"source\":{\"type\":\"ref\",\"path\":[\"input\",\"flags\"]}," ++
+        "\"body\":{\"type\":\"eq\"," ++
+        "\"left\":{\"type\":\"ref\",\"path\":[\"v\"]}," ++
+        "\"right\":{\"type\":\"value\",\"value\":true}}}";
+    try testing.expect(try run(
+        "{\"flags\":{\"a\":false,\"b\":true,\"c\":false}}",
+        policy,
+    ));
+    try testing.expect(!(try run(
+        "{\"flags\":{\"a\":false,\"b\":false}}",
+        policy,
+    )));
+}
+
+test "evaluate: every over object defaults to keys" {
+    const policy =
+        "{\"type\":\"every\",\"var\":\"k\"," ++
+        "\"source\":{\"type\":\"ref\",\"path\":[\"input\",\"m\"]}," ++
+        "\"body\":{\"type\":\"neq\"," ++
+        "\"left\":{\"type\":\"ref\",\"path\":[\"k\"]}," ++
+        "\"right\":{\"type\":\"value\",\"value\":\"banned\"}}}";
+    try testing.expect(try run("{\"m\":{\"x\":1,\"y\":2}}", policy));
+    try testing.expect(!(try run("{\"m\":{\"x\":1,\"banned\":2}}", policy)));
 }
 
 test "evaluate: every+some over arrays" {
