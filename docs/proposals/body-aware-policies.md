@@ -24,18 +24,33 @@ cannot be evaluated in either callback alone.
 
 ## Goals
 
-1. In `proxy_on_request_headers`, snapshot `:method`, `:path`,
-   `:authority`, and a configurable subset of request headers into
-   per-context state.
 1. Implement `proxy_on_request_body`:
    - Wait for `end_of_stream` (or buffer up to `max_body_bytes`).
    - Read the body via `proxy_get_buffer_bytes(BufferType.HttpRequestBody)`.
-   - Build an `input` JSON containing snapshot + parsed body.
-   - Run `evaluate` against the configured policy AST.
+   - Build an `input` JSON containing the parsed body.
+   - Evaluate the AST against a separate target rule `allow_body`.
    - On deny, call `proxy_send_local_response(403)` and return Pause;
      on allow, return Continue.
-1. Add an opt-in plugin config flag `require_body_eval: true` so hosts
-   that don't need body inspection don't pay the buffering cost.
+
+### v1 vs v2
+
+**v1 (this PR)**: body callback always runs against `allow_body`
+when it fires, with body-only input (no request snapshot, no
+opt-in flag, no per-prefix optimization). Header-side `allow` keeps
+its existing flat input untouched.
+
+**v2 (deferred)**:
+
+- Per-context snapshot of `:method` / `:path` / `:authority` /
+  selected headers in `proxy_on_request_headers`, surfaced to the
+  body rule as `input.method` etc.
+- Opt-in plugin config flag `require_body_eval: true` so hosts
+  that don't need body inspection skip buffering. When the flag
+  is on, the header phase still evaluates `allow` and short-circuits
+  on header-only deny decisions before the body fires (saves CPU
+  and the buffering cost on rejected requests).
+- Static AST analysis (see `streaming-evaluation.md`) can flip the
+  flag automatically when the policy references `input.body.*`.
 
 ## Non-goals
 
@@ -48,7 +63,9 @@ cannot be evaluated in either callback alone.
 
 ## Design sketch
 
-### Per-context state
+### Per-context state (v2 only)
+
+The v2 snapshot would look like:
 
 ```zig
 const RequestContext = struct {
@@ -59,36 +76,68 @@ const RequestContext = struct {
 };
 ```
 
-A small `AutoHashMap(u32, *RequestContext)` keyed by `context_id` lives
-in `host_allocator`. Cleared on `proxy_on_done`.
+with a `AutoHashMap(u32, *RequestContext)` keyed by `context_id`. The
+naive design holds the map in `host_allocator`, which means every
+field carries a manual `defer free` and `proxy_on_done` has to deep-
+free the inner string slices and the parsed `json.Value` tree.
+
+A cleaner approach (recommended, captured here so v2 starts from the
+right shape): give each context its **own arena**, allocated lazily
+on the first header callback and reset / freed in `proxy_on_done`.
+Saves the per-field free dance.
+
+**v1 has no per-context state.** Header / body callbacks operate
+independently and the body rule only sees the body itself.
 
 ### Input shape
 
+v1 (this PR) — body-only:
+
 ```json
 {
-  "method": "POST",
-  "path":   "/orders",
+  "body":     { "amount": 250 },
+  "body_raw": "{\"amount\":250}"
+}
+```
+
+v2 (deferred) — body plus the request snapshot:
+
+```json
+{
+  "method":  "POST",
+  "path":    "/orders",
   "headers": { "...": "..." },
   "body":     { "amount": 250 },
   "body_raw": "{\"amount\":250}"
 }
 ```
 
-`body` is present iff the body parsed as JSON. `body_raw` is always
-present once body eval ran.
+`body` is set to JSON `null` (not `undefined` -- that is not a JSON
+value) when the body fails to parse as JSON, when the body is empty,
+or when the read was truncated by `max_body_bytes`. In every case
+`body_raw` carries whatever bytes the host returned (capped). Rego-
+style policies that want to distinguish "no body" from "non-JSON
+body" can branch on `body_raw == ""` vs `body == null`.
 
 ### Buffer limit
 
-Configurable via plugin config: `max_body_bytes` (default 64 KiB). When
-exceeded, the policy sees `body: undefined` and `body_raw` truncated.
-Mirrors Envoy's own `max_request_bytes` posture.
+v1 hardcodes `max_body_bytes = 64 * 1024`. v2 will lift this into
+the plugin config alongside `require_body_eval`. When the host
+returns more than the cap, `proxy_get_buffer_bytes(start=0, max=cap)`
+already truncates on the host side -- v1 does not re-truncate, so
+`body_raw` length is always `<= cap` and `body` is `null` whenever
+the truncated bytes do not parse as a complete JSON document.
 
 ## API impact
 
-- `proxy_on_request_body` returns `Action.Pause` until evaluation
-  completes. Behavior change, but only when the host opts in via
-  `require_body_eval: true`.
-- New AST refs become valid: `input.body.<path>`, `input.body_raw`.
+- `proxy_on_request_body` returns `Action.Pause` on deny only (sends
+  403 first via `proxy_send_local_response`). Allow returns Continue.
+- New target rule name `allow_body` joins `allow` and `allow_response`.
+- New AST refs become valid under `allow_body`: `input.body.<path>`,
+  `input.body_raw`.
+- Existing `allow` policies continue to work unchanged (request-side
+  input shape stays flat with `input.method` / `input.path` /
+  `input.headers`).
 
 ## Test plan
 
