@@ -91,15 +91,30 @@ pub const Rule = struct {
 };
 
 /// A compiled policy module. Rules with the same name OR-combine.
+/// `package` is optional ("" means the implicit single-module case);
+/// see `Modules` for how multi-package bundles are addressed.
 pub const Module = struct {
     rules: []const Rule,
+    package: []const u8 = "",
+};
+
+/// A bundle of modules. Allows the proxy-wasm shim to load multiple
+/// independently authored policies into a single VM and dispatch
+/// per request to a specific `(package, rule)` target.
+///
+/// Bare `{"type":"module",...}` and bare expressions still work via
+/// `buildModule`; `buildModulesBundle` wraps either form into a
+/// single-element bundle with `package=""` for backwards compat.
+pub const Modules = struct {
+    modules: []const Module,
 };
 
 // Builders. Consume a `json.Value`, return arena-allocated nodes.
 
 /// Build a `Module`. Accepts either the canonical
 /// `{"type":"module","rules":[...]}` shape or a bare expression,
-/// which is wrapped into a synthetic `allow` rule.
+/// which is wrapped into a synthetic `allow` rule. `package` is
+/// read from the canonical shape if present.
 pub fn buildModule(allocator: std.mem.Allocator, node: Value) !Module {
     if (node != .object) return error.InvalidAst;
 
@@ -112,7 +127,11 @@ pub fn buildModule(allocator: std.mem.Allocator, node: Value) !Module {
         for (rules_v.array, 0..) |item, i| {
             rules[i] = try buildRule(allocator, item);
         }
-        return .{ .rules = rules };
+        const pkg: []const u8 = if (json.lookupMember(node.object, "package")) |p_v| pkg_blk: {
+            if (p_v != .string) return error.InvalidPackage;
+            break :pkg_blk p_v.string;
+        } else "";
+        return .{ .rules = rules, .package = pkg };
     }
 
     // Legacy: bare expression -> single synthetic `allow` rule.
@@ -126,7 +145,32 @@ pub fn buildModule(allocator: std.mem.Allocator, node: Value) !Module {
         .value = null,
         .is_default = false,
     };
-    return .{ .rules = rules };
+    return .{ .rules = rules, .package = "" };
+}
+
+/// Build a `Modules` bundle. Accepts:
+///   `{"type":"modules","modules":[<module>, ...]}` -> multi-package
+///   `{"type":"module", ...}`                       -> single module
+///   bare expression                                -> synthetic allow
+pub fn buildModulesBundle(allocator: std.mem.Allocator, node: Value) !Modules {
+    if (node == .object) {
+        if (json.lookupMember(node.object, "type")) |t_v| {
+            if (t_v == .string and std.mem.eql(u8, t_v.string, "modules")) {
+                const list_v = try requireField(node.object, "modules");
+                if (list_v != .array) return error.InvalidModules;
+                const mods = try allocator.alloc(Module, list_v.array.len);
+                for (list_v.array, 0..) |item, i| {
+                    mods[i] = try buildModule(allocator, item);
+                }
+                return .{ .modules = mods };
+            }
+        }
+    }
+    // Single-module / bare-expression form: wrap into a 1-element bundle.
+    const single = try buildModule(allocator, node);
+    const mods = try allocator.alloc(Module, 1);
+    mods[0] = single;
+    return .{ .modules = mods };
 }
 
 fn buildRule(allocator: std.mem.Allocator, node: Value) !Rule {
