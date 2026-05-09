@@ -48,13 +48,28 @@ pub const Expr = union(enum) {
         right: *const Expr,
     };
 
-    /// Iteration over an array or set. The evaluator binds each
-    /// element under `var_name` and runs `body`. `some` and `every`
-    /// share this shape; only the body combination differs.
+    /// Iteration over an array, set, or object. The evaluator binds
+    /// each element under `var_name` and runs `body`. `some` and
+    /// `every` share this shape; only the body combination differs.
+    ///
+    /// `kind` only matters when the source resolves to a JSON object;
+    /// for arrays and sets it is ignored.
     pub const Iter = struct {
         var_name: []const u8,
         source: *const Expr,
         body: *const Expr,
+        kind: IterKind = .keys,
+    };
+
+    pub const IterKind = enum {
+        keys,
+        values,
+
+        fn fromString(s: []const u8) ?IterKind {
+            if (std.mem.eql(u8, s, "keys")) return .keys;
+            if (std.mem.eql(u8, s, "values")) return .values;
+            return null;
+        }
     };
 
     /// Call to a builtin function. The evaluator looks `name` up in
@@ -200,10 +215,15 @@ pub fn buildExpr(allocator: std.mem.Allocator, node: Value) !*Expr {
         const var_name = try requireString(obj, "var");
         const source_v = try requireField(obj, "source");
         const body_v = try requireField(obj, "body");
+        const kind: Expr.IterKind = if (json.lookupMember(obj, "kind")) |k_v| blk: {
+            if (k_v != .string) return error.InvalidKind;
+            break :blk Expr.IterKind.fromString(k_v.string) orelse return error.UnknownKind;
+        } else .keys;
         const iter = Expr.Iter{
             .var_name = var_name,
             .source = try buildExpr(allocator, source_v),
             .body = try buildExpr(allocator, body_v),
+            .kind = kind,
         };
         expr.* = if (std.mem.eql(u8, t, "some"))
             .{ .some = iter }
