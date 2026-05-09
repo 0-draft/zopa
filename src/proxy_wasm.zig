@@ -17,6 +17,7 @@
 //! `malloc`. We `hostFree` them once consumed.
 
 const std = @import("std");
+const ast = @import("ast.zig");
 const eval = @import("eval.zig");
 const json = @import("json.zig");
 const memory = @import("memory.zig");
@@ -100,15 +101,14 @@ var configured_policy: ?[]u8 = null;
 
 // Pre-flight flags computed at configure time so the body / response
 // callbacks can short-circuit without paying the eval cost when the
-// policy doesn't carry rules for those phases. This also preserves
-// v0.1 behaviour for users who only authored an `allow` rule: a
-// missing `allow_response` rule must NOT replace every response with
-// a 503.
+// policy doesn't carry rules for those phases. Also preserves v0.1
+// behaviour for users who only authored an `allow` rule: a missing
+// `allow_response` rule must NOT replace every response with a 503.
 //
-// Detection uses a substring match against the quoted rule name in
-// the policy JSON. False positives are theoretically possible (e.g.
-// a literal string `"allow_body"` inside a policy value) but cause
-// only an unnecessary eval, never an incorrect decision.
+// Detection is a real AST scan (not a substring match): we parse the
+// policy JSON and walk every module's rule list looking for the
+// target name. A literal string `"allow_body"` sitting in policy
+// data therefore can't trip the flag and cause a spurious 403.
 var has_allow_body: bool = false;
 var has_allow_response: bool = false;
 
@@ -141,11 +141,32 @@ export fn proxy_on_configure(_: i32, configuration_size: i32) i32 {
         return 0;
     };
 
-    const policy = configured_policy.?;
-    has_allow_body = std.mem.indexOf(u8, policy, "\"allow_body\"") != null;
-    has_allow_response = std.mem.indexOf(u8, policy, "\"allow_response\"") != null;
-
+    scanPhaseRules(configured_policy.?);
     return result_ok;
+}
+
+/// Parse the policy bundle once at configure time and record which
+/// phase target rules (`allow_body`, `allow_response`) actually exist
+/// across every module. The request arena is empty here -- it's
+/// reused as scratch space and reset on the way out so the per-
+/// request hot path is unaffected.
+fn scanPhaseRules(policy: []const u8) void {
+    has_allow_body = false;
+    has_allow_response = false;
+
+    const arena = memory.requestArena();
+    defer memory.resetRequestArena();
+    const allocator = arena.allocator();
+
+    const ast_value = json.parse(allocator, policy) catch return;
+    const bundle = ast.buildModulesBundle(allocator, ast_value) catch return;
+
+    for (bundle.modules) |module| {
+        for (module.rules) |rule| {
+            if (std.mem.eql(u8, rule.name, "allow_body")) has_allow_body = true;
+            if (std.mem.eql(u8, rule.name, "allow_response")) has_allow_response = true;
+        }
+    }
 }
 
 export fn proxy_on_context_create(_: i32, _: i32) void {}

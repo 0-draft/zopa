@@ -1,0 +1,7 @@
+{
+  "name":  "set_literal_count",
+  "rego":  "package authz\n\nallow if count({\"a\", \"b\", \"c\"}) == 3\n",
+  "cases": [
+    { "input": {}, "expected": 1 }
+  ]
+}
