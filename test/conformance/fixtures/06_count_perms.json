@@ -1,0 +1,9 @@
+{
+  "name":  "count_perms",
+  "rego":  "package authz\n\nallow if count(input.perms) > 2\n",
+  "cases": [
+    { "input": { "perms": ["read", "write", "admin"] }, "expected": 1 },
+    { "input": { "perms": ["read", "write"] },          "expected": 0 },
+    { "input": { "perms": [] },                          "expected": 0 }
+  ]
+}

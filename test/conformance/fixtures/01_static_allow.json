@@ -1,0 +1,7 @@
+{
+  "name":  "static_allow",
+  "rego":  "package authz\n\ndefault allow = false\n\nallow if true\n",
+  "cases": [
+    { "input": {}, "expected": 1 }
+  ]
+}

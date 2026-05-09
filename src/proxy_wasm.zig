@@ -98,6 +98,20 @@ const empty_ptr: [*]const u8 = @ptrFromInt(1);
 
 var configured_policy: ?[]u8 = null;
 
+// Pre-flight flags computed at configure time so the body / response
+// callbacks can short-circuit without paying the eval cost when the
+// policy doesn't carry rules for those phases. This also preserves
+// v0.1 behaviour for users who only authored an `allow` rule: a
+// missing `allow_response` rule must NOT replace every response with
+// a 503.
+//
+// Detection uses a substring match against the quoted rule name in
+// the policy JSON. False positives are theoretically possible (e.g.
+// a literal string `"allow_body"` inside a policy value) but cause
+// only an unnecessary eval, never an incorrect decision.
+var has_allow_body: bool = false;
+var has_allow_response: bool = false;
+
 // Lifecycle exports.
 
 export fn proxy_on_vm_start(_: i32, _: i32) i32 {
@@ -126,18 +140,27 @@ export fn proxy_on_configure(_: i32, configuration_size: i32) i32 {
         configured_policy = null;
         return 0;
     };
+
+    const policy = configured_policy.?;
+    has_allow_body = std.mem.indexOf(u8, policy, "\"allow_body\"") != null;
+    has_allow_response = std.mem.indexOf(u8, policy, "\"allow_response\"") != null;
+
     return result_ok;
 }
 
 export fn proxy_on_context_create(_: i32, _: i32) void {}
 
-/// Evaluate against request headers. Deny short-circuits with a
-/// 403; allow lets the chain proceed.
+/// Evaluate against request headers under the `allow` target rule.
+/// Deny short-circuits with a 403; allow lets the chain proceed.
+/// `proxy_on_request_body` and `proxy_on_response_headers` then
+/// fire `allow_body` / `allow_response` independently against their
+/// own input shapes -- the three phases use disjoint target rules
+/// so a single bundled policy can carry rules for each.
 ///
-/// We don't pause to wait for the body: hosts clear `:method` /
-/// `:path` from the header map before `proxy_on_request_body` fires,
-/// so body-aware policies need per-request state plumbing.
-/// Tracked in ROADMAP.md.
+/// Hosts clear `:method` / `:path` from the header map before
+/// `proxy_on_request_body` fires, so a body rule that needs request
+/// context still requires per-context snapshot plumbing. That is
+/// tracked in `docs/proposals/body-aware-policies.md` § "v2".
 export fn proxy_on_request_headers(_: i32, _: i32, _: i32) i32 {
     const policy = configured_policy orelse return action_continue;
     if (!evaluateAt(map_type_request_headers, null, policy)) {
@@ -146,17 +169,20 @@ export fn proxy_on_request_headers(_: i32, _: i32, _: i32) i32 {
     return action_continue;
 }
 
-/// Evaluate against the request body once the host signals end of
-/// stream. Until then we return `Continue` so streaming chunks pass
-/// through; the final fragment triggers the eval. Body input shape
-/// is `{"body": <parsed-or-null>, "body_raw": <string>}`.
+/// Evaluate against the request body under the `allow_body` target
+/// rule, once the host signals end of stream. Until then we return
+/// `Continue` so streaming chunks pass through; the final fragment
+/// triggers the eval. Body input shape is
+/// `{"body": <parsed-or-null>, "body_raw": <string>}`.
 ///
 /// Hosts clear `:method` / `:path` from the header map by the time
 /// this fires (Envoy/wamr behaviour), so a body rule that needs
-/// header context must depend on a snapshot taken in
-/// `proxy_on_request_headers`. Per-context snapshot plumbing is
-/// tracked in ROADMAP.md; v1 surfaces only the body itself.
+/// header context still requires a per-context snapshot. Tracked in
+/// `docs/proposals/body-aware-policies.md` § "v2".
 export fn proxy_on_request_body(_: i32, body_size: i32, end_of_stream: i32) i32 {
+    // Skip cheaply when the policy doesn't have an `allow_body` rule,
+    // mirroring v0.1.0 behaviour where this callback was a no-op.
+    if (!has_allow_body) return action_continue;
     if (end_of_stream == 0) return action_continue;
     if (body_size <= 0) return action_continue;
     const policy = configured_policy orelse return action_continue;
@@ -236,6 +262,10 @@ fn buildBodyInput(allocator: std.mem.Allocator, body: []const u8) ![]u8 {
 /// `proxy_on_request_headers`; the two phases use disjoint target
 /// rules so a single bundled policy can carry both.
 export fn proxy_on_response_headers(_: i32, _: i32, _: i32) i32 {
+    // Skip cheaply when the policy doesn't have an `allow_response`
+    // rule. Without this gate every response would be replaced with
+    // a 503 for any policy that only carried request-side rules.
+    if (!has_allow_response) return action_continue;
     const policy = configured_policy orelse return action_continue;
     if (!evaluateResponseAt(policy)) {
         denyWithStatus(503);

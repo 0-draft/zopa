@@ -11,14 +11,42 @@ A complete policy:
 ```json
 {
   "type": "module",
+  "package": "authz",
   "rules": [ <Rule>, ... ]
 }
 ```
+
+| Field     | Meaning                                                                                                              |
+| --------- | -------------------------------------------------------------------------------------------------------------------- |
+| `rules`   | Required. List of `Rule` objects.                                                                                    |
+| `package` | Optional. Default `""`. Used by `Modules` bundles (below) to address a specific module via `(package, target_rule)`. |
 
 Evaluation picks every rule whose `name` matches the target rule
 (default `"allow"`) and OR-combines them. A bare expression at the
 top level (without `"type": "module"`) is wrapped into a synthetic
 `allow` rule -- handy for tests and small policies.
+
+## Modules bundle
+
+A wrapper that lets a single VM hold more than one module:
+
+```json
+{
+  "type": "modules",
+  "modules": [
+    { "type": "module", "package": "authz", "rules": [ ... ] },
+    { "type": "module", "package": "audit", "rules": [ ... ] }
+  ]
+}
+```
+
+The host dispatches into a specific package via `evaluate_addressed`
+or `evaluateAddressed`. The default `evaluate` entry implicitly
+targets package `""` + rule `"allow"`.
+
+A bare `Module` (or bare expression) is treated as a one-element
+bundle with `package = ""` -- existing single-module configs keep
+working unchanged.
 
 ## Rule
 
@@ -114,14 +142,20 @@ ignored by equality.
 {
   "type": "some",
   "var":  "x",
+  "kind": "keys" | "values",
   "source": <Expr>,
   "body":   <Expr>
 }
 ```
 
-Resolves `source` to an array or set, then evaluates `body` once for
-each element with `x` bound. True iff any iteration's body holds. An
-empty source yields `false`.
+Resolves `source` to an array, set, or object, then evaluates
+`body` once for each element with `x` bound. True iff any
+iteration's body holds. An empty source yields `false`.
+
+`kind` only matters when `source` resolves to a JSON object. With
+`"keys"` (the default), `x` binds to each key as a string; with
+`"values"`, to each member's value. Arrays and sets ignore `kind`
+and bind elements directly.
 
 ### `every` -- universal
 
@@ -129,13 +163,41 @@ empty source yields `false`.
 {
   "type": "every",
   "var":  "x",
+  "kind": "keys" | "values",
   "source": <Expr>,
   "body":   <Expr>
 }
 ```
 
 Same shape as `some`, but the body must hold for every element.
-An empty source yields `true` (vacuous).
+An empty source yields `true` (vacuous). `kind` works as for
+`some`.
+
+### `call` -- builtin function
+
+```json
+{
+  "type": "call",
+  "name": "startswith",
+  "args": [ <Expr>, <Expr>, ... ]
+}
+```
+
+Invokes one of the builtin functions on its resolved arguments and
+folds the result back into a `Value`. Type mismatches resolve to
+`nil` (treated as falsy / undefined in body position), matching
+Rego's missing-path posture.
+
+| Name         | Arity | Args                         | Returns |
+| ------------ | ----- | ---------------------------- | ------- |
+| `startswith` | 2     | (string, string)             | boolean |
+| `endswith`   | 2     | (string, string)             | boolean |
+| `contains`   | 2     | (string, string)             | boolean |
+| `count`      | 1     | (array, set, object, string) | number  |
+
+The argument cap is 8 (`max_builtin_args` in `src/eval.zig`); calls
+beyond that resolve to `nil`. Unknown builtin names also resolve to
+`nil`.
 
 ## Decision encoding
 

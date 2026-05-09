@@ -75,3 +75,29 @@ export fn evaluate_target(
     const decision = eval.evaluateWithTarget(arena, input, ast_bytes, target) catch return -1;
     return if (decision) 1 else 0;
 }
+
+/// Run one evaluation against `package.rule`. Used by the
+/// conformance harness to dispatch into a Rego module's specific
+/// package (e.g. `authz`) without the host having to know about
+/// zopa's internal `Modules` bundle representation.
+export fn evaluate_addressed(
+    input_ptr: [*]const u8,
+    input_len: usize,
+    ast_ptr: [*]const u8,
+    ast_len: usize,
+    package_ptr: [*]const u8,
+    package_len: usize,
+    target_ptr: [*]const u8,
+    target_len: usize,
+) i32 {
+    defer memory.resetRequestArena();
+
+    const arena = memory.requestArena();
+    const input = input_ptr[0..input_len];
+    const ast_bytes = ast_ptr[0..ast_len];
+    const package = package_ptr[0..package_len];
+    const target = target_ptr[0..target_len];
+
+    const decision = eval.evaluateAddressed(arena, input, ast_bytes, package, target) catch return -1;
+    return if (decision) 1 else 0;
+}
