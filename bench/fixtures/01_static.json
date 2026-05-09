@@ -1,0 +1,7 @@
+{
+  "name":  "01_static",
+  "input": {},
+  "ast":   { "type": "value", "value": true },
+  "rego":  "package authz\n\ndefault allow = true\n",
+  "cedar": "permit(principal, action, resource);"
+}
