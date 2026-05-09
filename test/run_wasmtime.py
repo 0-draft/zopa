@@ -60,6 +60,7 @@ exports = instance.exports(store)
 malloc = exports["malloc"]
 free = exports["free"]
 evaluate = exports["evaluate"]
+evaluate_target = exports["evaluate_target"]
 memory: wasmtime.Memory = exports["memory"]
 
 
@@ -86,6 +87,18 @@ def decide(input_obj, ast_obj) -> int:
     finally:
         free(store, ip)
         free(store, ap)
+
+
+def decide_target(input_obj, ast_obj, target: str) -> int:
+    ip, il = write_json(input_obj)
+    ap, al = write_json(ast_obj)
+    tp, tl = write_bytes(target.encode("utf-8"))
+    try:
+        return evaluate_target(store, ip, il, ap, al, tp, tl)
+    finally:
+        free(store, ip)
+        free(store, ap)
+        free(store, tp)
 
 
 # ---------------------------------------------------------------------------
@@ -409,6 +422,43 @@ two_packages = {
 }
 check("modules bundle: default entry picks empty package", decide({"user": {"role": "admin"}}, two_packages), 1)
 check("modules bundle: audit module invisible from default entry", decide({"user": {"role": "guest"}}, two_packages), 0)
+
+# ---------------------------------------------------------------------------
+# 11. evaluate_target: response-side rules via the explicit-target export.
+# ---------------------------------------------------------------------------
+response_policy = {
+    "type": "module",
+    "rules": [
+        {"type": "rule", "name": "allow_response", "default": True, "value": {"type": "value", "value": True}},
+        {
+            "type": "rule",
+            "name": "allow_response",
+            "body": [
+                {
+                    "type": "gte",
+                    "left": {"type": "ref", "path": ["input", "response", "status"]},
+                    "right": {"type": "value", "value": 500},
+                }
+            ],
+            "value": {"type": "value", "value": False},
+        },
+    ],
+}
+check(
+    "evaluate_target allow_response: 500 -> deny",
+    decide_target({"response": {"status": 500, "headers": {}}}, response_policy, "allow_response"),
+    0,
+)
+check(
+    "evaluate_target allow_response: 200 -> allow",
+    decide_target({"response": {"status": 200, "headers": {}}}, response_policy, "allow_response"),
+    1,
+)
+check(
+    "evaluate_target with missing target rule -> deny",
+    decide_target({}, {"type": "value", "value": True}, "allow_response"),
+    0,
+)
 
 if failed:
     print(f"\n{failed} test(s) failed", file=sys.stderr)

@@ -21,7 +21,7 @@ const { instance } = await WebAssembly.instantiate(bytes, {
   },
 });
 
-const { malloc, free, evaluate, memory } = instance.exports;
+const { malloc, free, evaluate, evaluate_target, memory } = instance.exports;
 const enc = new TextEncoder();
 
 function writeBytes(bytes) {
@@ -47,6 +47,19 @@ function decide(input, ast) {
   } finally {
     freeBuf(i);
     freeBuf(a);
+  }
+}
+
+function decideTarget(input, ast, target) {
+  const i = writeJson(input);
+  const a = writeJson(ast);
+  const t = writeBytes(enc.encode(target));
+  try {
+    return evaluate_target(i.ptr, i.len, a.ptr, a.len, t.ptr, t.len);
+  } finally {
+    freeBuf(i);
+    freeBuf(a);
+    freeBuf(t);
   }
 }
 
@@ -549,6 +562,48 @@ const twoPackages = {
 };
 check('modules bundle: default entry picks empty package', decide({ user: { role: 'admin' } }, twoPackages), 1);
 check('modules bundle: audit module invisible from default entry', decide({ user: { role: 'guest' } }, twoPackages), 0);
+
+// ---------------------------------------------------------------------------
+// 11. evaluate_target: response-side rules driven via the new export.
+//
+// proxy_on_response_headers in proxy_wasm.zig fires the
+// "allow_response" target rule against an input shape with response
+// status / headers. The generic `evaluate_target` export lets hosts
+// reach the same eval path without going through proxy-wasm.
+// ---------------------------------------------------------------------------
+const responsePolicy = {
+  type: 'module',
+  rules: [
+    { type: 'rule', name: 'allow_response', default: true, value: { type: 'value', value: true } },
+    {
+      type: 'rule',
+      name: 'allow_response',
+      body: [
+        {
+          type: 'gte',
+          left: { type: 'ref', path: ['input', 'response', 'status'] },
+          right: { type: 'value', value: 500 },
+        },
+      ],
+      value: { type: 'value', value: false },
+    },
+  ],
+};
+check(
+  'evaluate_target allow_response: 500 -> deny (replace with 503)',
+  decideTarget({ response: { status: 500, headers: {} } }, responsePolicy, 'allow_response'),
+  0,
+);
+check(
+  'evaluate_target allow_response: 200 -> allow',
+  decideTarget({ response: { status: 200, headers: {} } }, responsePolicy, 'allow_response'),
+  1,
+);
+check(
+  'evaluate_target with missing target rule -> deny',
+  decideTarget({}, { type: 'value', value: true }, 'allow_response'),
+  0,
+);
 
 if (failed > 0) {
   console.error(`\n${failed} test(s) failed`);
