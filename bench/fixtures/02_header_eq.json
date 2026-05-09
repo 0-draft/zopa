@@ -8,5 +8,5 @@
     "right": { "type": "value", "value": "GET" }
   },
   "rego":  "package authz\n\nallow if input.method == \"GET\"\n",
-  "cedar": "permit(principal, action == Action::\"GET\", resource);"
+  "cedar": "permit(principal, action, resource) when { context.method == \"GET\" };"
 }
