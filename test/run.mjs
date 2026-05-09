@@ -423,6 +423,70 @@ check(
   0,
 );
 
+// ---------------------------------------------------------------------------
+// 9. some / every over object refs (kind: keys / values, default keys)
+// ---------------------------------------------------------------------------
+const everyKeyNotInternal = {
+  type: 'every', var: 'k', kind: 'keys',
+  source: { type: 'ref', path: ['input', 'attrs'] },
+  body: {
+    type: 'neq',
+    left: { type: 'ref', path: ['k'] },
+    right: { type: 'value', value: 'internal' },
+  },
+};
+check(
+  'every over object keys: no banned key -> allow',
+  decide({ attrs: { team: 'sre', region: 'us-east' } }, everyKeyNotInternal),
+  1,
+);
+check(
+  'every over object keys: banned key present -> deny',
+  decide({ attrs: { team: 'sre', internal: 'yes' } }, everyKeyNotInternal),
+  0,
+);
+
+const someValueTrue = {
+  type: 'some', var: 'v', kind: 'values',
+  source: { type: 'ref', path: ['input', 'flags'] },
+  body: {
+    type: 'eq',
+    left: { type: 'ref', path: ['v'] },
+    right: { type: 'value', value: true },
+  },
+};
+check(
+  'some over object values: at least one true -> allow',
+  decide({ flags: { a: false, b: true, c: false } }, someValueTrue),
+  1,
+);
+check(
+  'some over object values: all false -> deny',
+  decide({ flags: { a: false, b: false } }, someValueTrue),
+  0,
+);
+
+// `kind` defaults to "keys" when omitted on an object source.
+const everyDefaultKeysNotBanned = {
+  type: 'every', var: 'k',
+  source: { type: 'ref', path: ['input', 'm'] },
+  body: {
+    type: 'neq',
+    left: { type: 'ref', path: ['k'] },
+    right: { type: 'value', value: 'banned' },
+  },
+};
+check(
+  'every over object defaults to keys: clean -> allow',
+  decide({ m: { x: 1, y: 2 } }, everyDefaultKeysNotBanned),
+  1,
+);
+check(
+  'every over object defaults to keys: banned -> deny',
+  decide({ m: { x: 1, banned: 2 } }, everyDefaultKeysNotBanned),
+  0,
+);
+
 if (failed > 0) {
   console.error(`\n${failed} test(s) failed`);
   exit(1);
