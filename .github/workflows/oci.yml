@@ -1,0 +1,87 @@
+# OCI image flow:
+#   1. push to main -> build + push :edge (multi-arch)
+#   2. tag v* -> build + push :v<tag> and update :latest
+#   3. cosign keyless signs the image manifest
+#
+# secrets: none. credentials are minted via OIDC per run.
+
+name: oci
+
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  pull_request:
+  workflow_dispatch:
+
+permissions: {}
+
+jobs:
+  image:
+    name: build + push image
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+      id-token: write
+    steps:
+      - name: harden runner
+        uses: step-security/harden-runner@a5ad31d6a139d249332a2605b85202e8c0b78450 # v2
+        with:
+          egress-policy: audit
+
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+
+      - uses: docker/setup-qemu-action@29109295f81e9208d7d86ff1c6c12d2833863392 # v3
+      - uses: docker/setup-buildx-action@e468171a9de216ec08956ac3ada2f0791b6bd435 # v3
+
+      - name: log in to ghcr (push events only)
+        if: github.event_name != 'pull_request'
+        uses: docker/login-action@74a5d142397b4f367a81961eba4e8cd7edddf772 # v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: derive tags
+        id: tags
+        run: |
+          set -euo pipefail
+          repo="ghcr.io/${GITHUB_REPOSITORY,,}"
+          if [[ "${GITHUB_REF}" == refs/tags/v* ]]; then
+            tag="${GITHUB_REF_NAME}"
+            echo "tags=${repo}:${tag},${repo}:latest" >>"$GITHUB_OUTPUT"
+          else
+            echo "tags=${repo}:edge" >>"$GITHUB_OUTPUT"
+          fi
+
+      - name: build (and push for non-PR events)
+        id: build
+        uses: docker/build-push-action@67de6432d4ed18d52d0de01d5b6cdc5fb358c40c # v6
+        with:
+          context: .
+          file: Dockerfile
+          platforms: linux/amd64,linux/arm64
+          push: ${{ github.event_name != 'pull_request' }}
+          tags: ${{ steps.tags.outputs.tags }}
+          provenance: true
+          sbom: true
+
+      - name: install cosign
+        if: github.event_name != 'pull_request'
+        uses: sigstore/cosign-installer@2cd17a85cb04a6dc466f036d9c52069ada6037e1 # v3
+
+      - name: cosign sign manifest
+        if: github.event_name != 'pull_request'
+        env:
+          DIGEST: ${{ steps.build.outputs.digest }}
+          TAGS: ${{ steps.tags.outputs.tags }}
+          COSIGN_EXPERIMENTAL: "1"
+        run: |
+          set -euo pipefail
+          IFS=',' read -ra refs <<<"$TAGS"
+          for ref in "${refs[@]}"; do
+            cosign sign --yes "${ref}@${DIGEST}"
+          done
