@@ -13,6 +13,10 @@ const WASM_PATH = process.argv[2] ?? DEFAULT_WASM;
 const WARMUP = 1000;
 const ITERS = 10000;
 
+// Minimal stubs for isolated benchmarking. These always succeed and
+// would mask real proxy errors if reached, but the generic `evaluate`
+// path doesn't call them, so an unexpected hit means the harness has
+// drifted from what the wasm expects.
 const { instance } = await WebAssembly.instantiate(
   readFileSync(WASM_PATH),
   { env: {
@@ -44,7 +48,15 @@ function runFixture(fix) {
   const i = writeJson(fix.input);
   const a = writeJson(fix.ast);
   try {
-    for (let k = 0; k < WARMUP; k++) evaluate(i.ptr, i.len, a.ptr, a.len);
+    // Warmup also validates the policy actually evaluates without
+    // error. evaluate() returns 1 (allow), 0 (deny), or -1 (parse /
+    // depth-cap / unknown-node failures). We bail on -1 so the
+    // benchmark never times an error path; allow + deny are both
+    // legitimate decisions to measure.
+    for (let k = 0; k < WARMUP; k++) {
+      const r = evaluate(i.ptr, i.len, a.ptr, a.len);
+      if (r === -1) throw new Error(`fixture ${fix.name}: evaluate returned -1`);
+    }
     const samples = new Float64Array(ITERS);
     for (let k = 0; k < ITERS; k++) {
       const t0 = process.hrtime.bigint();
