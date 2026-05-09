@@ -45,14 +45,29 @@ const Scope = struct {
 /// function neither inits nor resets it -- that is the caller's job.
 ///
 /// Targets the default package ("") and the default rule ("allow").
-/// Use `evaluateAddressed` to dispatch into a specific `package.rule`
-/// pair within a `{"type":"modules", ...}` bundle.
+/// Use `evaluateWithTarget` to pick a non-default rule (e.g.
+/// "allow_response"), or `evaluateAddressed` to dispatch into a
+/// specific `package.rule` pair within a `{"type":"modules", ...}`
+/// bundle.
 pub fn evaluate(
     arena: *std.heap.ArenaAllocator,
     input_json: []const u8,
     ast_json: []const u8,
 ) !bool {
     return evaluateAddressed(arena, input_json, ast_json, "", default_target_rule);
+}
+
+/// Run a single evaluation against `target_rule` in the default
+/// package (""). Used by the proxy-wasm shim to route the
+/// response-phase callback to the `allow_response` rule while
+/// keeping the request-phase on `allow`.
+pub fn evaluateWithTarget(
+    arena: *std.heap.ArenaAllocator,
+    input_json: []const u8,
+    ast_json: []const u8,
+    target_rule: []const u8,
+) !bool {
+    return evaluateAddressed(arena, input_json, ast_json, "", target_rule);
 }
 
 /// Run a single evaluation against `target_package.target_rule`. The
@@ -548,6 +563,53 @@ test "modules bundle: OR across two modules in same package" {
     try testing.expect(try runAddressed("{\"role\":\"admin\"}", policy, "authz", "allow"));
     try testing.expect(try runAddressed("{\"role\":\"editor\"}", policy, "authz", "allow"));
     try testing.expect(!(try runAddressed("{\"role\":\"guest\"}", policy, "authz", "allow")));
+}
+
+fn runWithTarget(input: []const u8, ast_src: []const u8, target: []const u8) !bool {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    return evaluateWithTarget(&arena, input, ast_src, target);
+}
+
+test "evaluateWithTarget: allow_response fires on 5xx" {
+    const policy =
+        "{\"type\":\"module\",\"rules\":[" ++
+        "{\"type\":\"rule\",\"name\":\"allow_response\",\"default\":true," ++
+        "\"value\":{\"type\":\"value\",\"value\":true}}," ++
+        "{\"type\":\"rule\",\"name\":\"allow_response\",\"body\":[" ++
+        "{\"type\":\"gte\"," ++
+        "\"left\":{\"type\":\"ref\",\"path\":[\"input\",\"response\",\"status\"]}," ++
+        "\"right\":{\"type\":\"value\",\"value\":500}}]," ++
+        "\"value\":{\"type\":\"value\",\"value\":false}}" ++
+        "]}";
+
+    // 5xx responses fail the allow_response rule -> deny -> 503 replacement.
+    try testing.expect(!(try runWithTarget(
+        "{\"response\":{\"status\":500,\"headers\":{}}}",
+        policy,
+        "allow_response",
+    )));
+
+    // Non-5xx responses go through default (allow).
+    try testing.expect(try runWithTarget(
+        "{\"response\":{\"status\":200,\"headers\":{}}}",
+        policy,
+        "allow_response",
+    ));
+}
+
+test "evaluateWithTarget: missing target rule -> deny" {
+    const policy =
+        "{\"type\":\"module\",\"rules\":[" ++
+        "{\"type\":\"rule\",\"name\":\"allow\",\"body\":[" ++
+        "{\"type\":\"value\",\"value\":true}]}]}";
+    // Policy only has `allow`; `allow_response` doesn't exist.
+    try testing.expect(!(try runWithTarget("{}", policy, "allow_response")));
+}
+
+test "evaluateWithTarget: allow target preserves default behaviour" {
+    const policy = "{\"type\":\"value\",\"value\":true}";
+    try testing.expect(try runWithTarget("{}", policy, "allow"));
 }
 
 test "evaluate: every+some over arrays" {

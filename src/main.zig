@@ -51,3 +51,26 @@ export fn evaluate(
     const decision = eval.evaluate(arena, input, ast_bytes) catch return -1;
     return if (decision) 1 else 0;
 }
+
+/// Run one evaluation against an explicit target rule. Same return
+/// codes as `evaluate`. Hosts that want to drive the response-side
+/// "allow_response" path (or any other target name) call this
+/// instead of the default `evaluate`.
+export fn evaluate_target(
+    input_ptr: [*]const u8,
+    input_len: usize,
+    ast_ptr: [*]const u8,
+    ast_len: usize,
+    target_ptr: [*]const u8,
+    target_len: usize,
+) i32 {
+    defer memory.resetRequestArena();
+
+    const arena = memory.requestArena();
+    const input = input_ptr[0..input_len];
+    const ast_bytes = ast_ptr[0..ast_len];
+    const target = target_ptr[0..target_len];
+
+    const decision = eval.evaluateWithTarget(arena, input, ast_bytes, target) catch return -1;
+    return if (decision) 1 else 0;
+}

@@ -3,8 +3,9 @@
 //! Lifecycle: `proxy_on_vm_start`, `proxy_on_configure`,
 //! `proxy_on_context_create`, `proxy_on_request_headers`,
 //! `proxy_on_request_body`, `proxy_on_response_headers`,
-//! `proxy_on_done`. Body and response callbacks are no-ops in this
-//! revision; see ROADMAP.md.
+//! `proxy_on_done`. Request headers fire the "allow" target rule;
+//! response headers fire "allow_response" with `{"response":{...}}`.
+//! Body callbacks are no-ops; see ROADMAP.md.
 //!
 //! Configuration: the policy AST JSON arrives via
 //! `proxy_on_configure`. We copy it into `host_allocator` so it
@@ -149,10 +150,66 @@ export fn proxy_on_request_body(_: i32, _: i32, _: i32) i32 {
     return action_continue;
 }
 
-/// No-op for now. Response-side policies need a different input
-/// shape and a separate target rule.
+/// Evaluate against response status + headers under the
+/// `allow_response` target rule. Deny replaces the response with a
+/// 503; allow lets the upstream response through unchanged.
+///
+/// Request-side policy targeting "allow" runs in
+/// `proxy_on_request_headers`; the two phases use disjoint target
+/// rules so a single bundled policy can carry both.
 export fn proxy_on_response_headers(_: i32, _: i32, _: i32) i32 {
+    const policy = configured_policy orelse return action_continue;
+    if (!evaluateResponseAt(policy)) {
+        denyWithStatus(503);
+    }
     return action_continue;
+}
+
+const response_target_rule: []const u8 = "allow_response";
+
+fn evaluateResponseAt(policy: []const u8) bool {
+    const arena = memory.requestArena();
+    defer memory.resetRequestArena();
+    const allocator = arena.allocator();
+
+    const input_bytes = buildResponseInput(allocator) catch return false;
+    return eval.evaluateWithTarget(arena, input_bytes, policy, response_target_rule) catch false;
+}
+
+/// Build `{"response":{"status":<int>,"headers":{...}}}` from the
+/// response header map. `:status` is fetched individually for the
+/// same wamr-host reasons that drive the request-side path.
+fn buildResponseInput(allocator: std.mem.Allocator) ![]u8 {
+    const status_str = (try readSingleHeader(allocator, map_type_response_headers, ":status")) orelse "";
+    const headers = readAllHeaders(allocator, map_type_response_headers) catch &[_]HeaderPair{};
+
+    const status_num = std.fmt.parseInt(i32, status_str, 10) catch -1;
+
+    var buf: std.ArrayList(u8) = .empty;
+    defer buf.deinit(allocator);
+
+    try buf.appendSlice(allocator, "{\"response\":{\"status\":");
+    if (status_num < 0) {
+        try buf.appendSlice(allocator, "null");
+    } else {
+        var num_buf: [16]u8 = undefined;
+        const slice = std.fmt.bufPrint(&num_buf, "{d}", .{status_num}) catch unreachable;
+        try buf.appendSlice(allocator, slice);
+    }
+
+    try buf.appendSlice(allocator, ",\"headers\":{");
+    var first = true;
+    for (headers) |h| {
+        if (h.key.len > 0 and h.key[0] == ':') continue;
+        if (!first) try buf.append(allocator, ',');
+        first = false;
+        try appendJsonString(allocator, &buf, h.key);
+        try buf.append(allocator, ':');
+        try appendJsonString(allocator, &buf, h.value);
+    }
+    try buf.appendSlice(allocator, "}}}");
+
+    return try allocator.dupe(u8, buf.items);
 }
 
 export fn proxy_on_done(_: i32) i32 {
