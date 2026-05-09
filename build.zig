@@ -109,4 +109,19 @@ pub fn build(b: *std.Build) void {
         "Run zopa.wasm latency benchmark in Node.js",
     );
     bench_step.dependOn(&bench_run.step);
+
+    // `zig build test-conformance` -> rego (via `opa parse` +
+    // tools/rego2ast.py) is fed through zopa.wasm and decisions are
+    // compared to fixture expectations. Needs the project venv plus
+    // an `opa` CLI on PATH. See test/conformance/README.md.
+    const conformance_run = b.addSystemCommand(&.{
+        ".venv-test/bin/python",
+        "test/conformance/run.py",
+    });
+    conformance_run.step.dependOn(b.getInstallStep());
+    const test_conformance_step = b.step(
+        "test-conformance",
+        "Run OPA conformance fixtures (rego -> zopa AST -> evaluate)",
+    );
+    test_conformance_step.dependOn(&conformance_run.step);
 }

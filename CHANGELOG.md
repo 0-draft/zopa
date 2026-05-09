@@ -6,6 +6,72 @@ once the first stable tag ships.
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-05-10
+
+Public surface still alpha. Existing v0.1 policies (single `allow`
+target rule, flat request-side input) keep working unchanged: the
+new body and response phases are opt-in via the matching rule
+(`allow_body` / `allow_response`) appearing in the policy.
+
+### Added
+
+- AST node `call` plus four builtins: `startswith`, `endswith`,
+  `contains`, `count`. Type errors and unknown names resolve to
+  `nil` (deny in body position).
+- `some` / `every` iteration over JSON objects via a new optional
+  `kind` field (`"keys"` default, `"values"`).
+- `Modules` bundle wrapper (`{"type": "modules", "modules": [...]}`)
+  and an optional `package` field on `Module`.
+- `proxy_on_request_body` evaluates `allow_body` against
+  `{body, body_raw}` once end of stream is signalled. Body buffer
+  cap: 64 KiB. Body parsed as JSON when possible; otherwise `body`
+  is `null` and `body_raw` carries the bytes.
+- `proxy_on_response_headers` evaluates `allow_response` against
+  `{response: {status, headers}}`. Deny replaces the upstream
+  response with a 503.
+- New wasm exports `evaluate_target(input, ast, target_rule)` and
+  `evaluate_addressed(input, ast, package, target_rule)` for hosts
+  driving non-default rules without proxy-wasm.
+- `src/body_deps.zig`: configure-time analyser that classifies a
+  module's body references as `no_body_refs` / `prefix_only` /
+  `full_tree`. Foundation for the streaming runtime; not wired into
+  the proxy-wasm shim yet.
+- `zig build bench`: Node-based latency benchmark over
+  `bench/fixtures/`, reporting p50/p95/p99/mean.
+- `zig build test-conformance`: drives `opa parse` →
+  `tools/rego2ast.py` → zopa for each fixture in
+  `test/conformance/fixtures/`. Six starter fixtures cover bool
+  comparators, builtins, `every`, `not`, `count`, missing-path
+  semantics.
+- Distroless multi-arch OCI image at `ghcr.io/0-draft/zopa`,
+  cosign-signed, built on every tag via
+  `.github/workflows/oci.yml`.
+- CI gains `test-unit`, `bench (smoke)`, and `test-conformance`
+  jobs alongside the existing `build`, `test`, `test-wasmtime`, and
+  the `lint` workflow's `zig-fmt` / `markdownlint` / `shellcheck`.
+
+### Changed
+
+- Public eval surface layered: `evaluate` is now a thin wrapper over
+  `evaluateWithTarget`, which is a wrapper over `evaluateAddressed`.
+  Behaviour at the `evaluate` entry point is unchanged.
+- Missing path inside `compare` (and any other `resolveValue` site)
+  now resolves to `Value.nil` rather than propagating
+  `error.PathNotFound`. Aligns with Rego's "missing is undefined"
+  semantics: a body using `input.user.role == "admin"` against `{}`
+  now denies (0) instead of erroring (-1).
+- `proxy_on_request_body` and `proxy_on_response_headers` short-
+  circuit at configure time when their target rule (`allow_body`,
+  `allow_response`) is absent from the policy. Detection is a
+  substring match in the policy JSON. Pre-v0.2 callers with a
+  request-only policy retain the v0.1 pass-through behaviour for
+  the body and response phases.
+- Release build size: ~50 KB → ~60 KB. The increase covers `call`,
+  object iteration, the `Modules` bundle, the two new target-rule
+  paths, and the body-deps analyser.
+
+[0.2.0]: https://github.com/0-draft/zopa/releases/tag/v0.2.0
+
 ## [0.1.0] - 2026-05-07
 
 First tagged release. Public surface (export names, AST schema,
@@ -40,5 +106,5 @@ callback semantics) is still alpha and may change before 1.0.
 
 [kac]: https://keepachangelog.com/en/1.1.0/
 [semver]: https://semver.org/spec/v2.0.0.html
-[Unreleased]: https://github.com/0-draft/zopa/compare/v0.1.0...HEAD
+[Unreleased]: https://github.com/0-draft/zopa/compare/v0.2.0...HEAD
 [0.1.0]: https://github.com/0-draft/zopa/releases/tag/v0.1.0

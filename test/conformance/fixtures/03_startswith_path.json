@@ -1,0 +1,8 @@
+{
+  "name":  "startswith_path",
+  "rego":  "package authz\n\nallow if startswith(input.path, \"/admin/\")\n",
+  "cases": [
+    { "input": { "path": "/admin/users" }, "expected": 1 },
+    { "input": { "path": "/users" },        "expected": 0 }
+  ]
+}

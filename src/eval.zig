@@ -311,7 +311,15 @@ fn resolveValue(
     if (depth >= max_eval_depth) return error.EvalTooDeep;
     return switch (expr.*) {
         .value => |v| v,
-        .ref => |path| try resolveRef(input, scope, path),
+        // Missing paths in Rego are *undefined*. We surface that as
+        // `Value.nil` so callers (compare, call, iterators) see a
+        // type-mismatched value rather than an error -- a missing
+        // ref inside `eq` should produce false, not -1. EvalTooDeep
+        // and RefYieldsComposite still propagate.
+        .ref => |path| resolveRef(input, scope, path) catch |err| switch (err) {
+            error.PathNotFound, error.PathNotObject => json.Value.nil,
+            else => return err,
+        },
         .compare => |c| .{ .boolean = try evalCompare(c, input, scope, depth + 1) },
         .not => |inner| .{ .boolean = !(try evalExprBool(inner, input, scope, depth + 1)) },
         .some => |it| .{ .boolean = try evalSome(it, input, scope, depth + 1) },
@@ -413,6 +421,21 @@ test "evaluate: ref equality" {
 
 test "evaluate: missing ref denies" {
     try testing.expect(!(try run("{}", "{\"type\":\"ref\",\"path\":[\"input\",\"missing\"]}")));
+}
+
+test "evaluate: missing ref inside compare denies (Rego undefined semantics)" {
+    // `input.user.role == "admin"` against `{}` -- the ref resolves
+    // to undefined; comparing undefined with a string is false, which
+    // means deny in body position. zopa used to surface this as -1
+    // (error) which diverged from Rego.
+    const policy =
+        "{\"type\":\"compare\",\"op\":\"eq\"," ++
+        "\"left\":{\"type\":\"ref\",\"path\":[\"input\",\"user\",\"role\"]}," ++
+        "\"right\":{\"type\":\"value\",\"value\":\"admin\"}}";
+    try testing.expect(!(try run("{}", policy)));
+    // Sanity: present + matching -> allow, present + mismatch -> deny.
+    try testing.expect(try run("{\"user\":{\"role\":\"admin\"}}", policy));
+    try testing.expect(!(try run("{\"user\":{\"role\":\"guest\"}}", policy)));
 }
 
 test "evaluate: default rule when no other rule matches" {

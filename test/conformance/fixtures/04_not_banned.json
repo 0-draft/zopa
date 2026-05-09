@@ -1,0 +1,9 @@
+{
+  "name":  "not_banned",
+  "rego":  "package authz\n\nallow if not input.banned\n",
+  "cases": [
+    { "input": { "banned": false }, "expected": 1 },
+    { "input": { "banned": true },  "expected": 0 },
+    { "input": {},                  "expected": 1 }
+  ]
+}

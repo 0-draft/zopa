@@ -33,16 +33,39 @@ A host that supports a different version should refuse to load.
 | `proxy_on_vm_start`         | `(root_id, vm_config_size) -> i32`                | Returns 1 (OK).                                                                                                                                                                                       |
 | `proxy_on_configure`        | `(context_id, config_size) -> i32`                | Reads the policy AST JSON via `proxy_get_buffer_bytes(BufferType.PluginConfiguration)` and stores it in `host_allocator`. Returning 0 from here is treated as an unrecoverable load failure by Envoy. |
 | `proxy_on_context_create`   | `(context_id, parent_context_id) -> void`         | No-op.                                                                                                                                                                                                |
-| `proxy_on_request_headers`  | `(context_id, num_headers, end_of_stream) -> i32` | Builds an input from the request header map and runs `evaluate`. Returns `Action.Continue`. Sends a 403 via `proxy_send_local_response` on deny.                                                      |
-| `proxy_on_request_body`     | `(context_id, body_size, end_of_stream) -> i32`   | Currently a no-op (returns Continue). Body-aware evaluation needs per-request state plumbing -- see ROADMAP.md.                                                                                       |
-| `proxy_on_response_headers` | `(context_id, num_headers, end_of_stream) -> i32` | Currently a no-op. Response policies need a separate target rule and a response-shaped input.                                                                                                         |
+| `proxy_on_request_headers`  | `(context_id, num_headers, end_of_stream) -> i32` | Builds the request-side input and evaluates against the `allow` target rule. Returns `Action.Continue`. Sends a 403 via `proxy_send_local_response` on deny.                                          |
+| `proxy_on_request_body`     | `(context_id, body_size, end_of_stream) -> i32`   | Once the host signals end of stream, reads the body up to `max_body_bytes` (64 KiB) and evaluates against `allow_body` with `{body, body_raw}` input. Sends 403 + Pause on deny; otherwise Continue.  |
+| `proxy_on_response_headers` | `(context_id, num_headers, end_of_stream) -> i32` | Builds a response-side input (`{response: {status, headers}}`) and evaluates against `allow_response`. Replaces the upstream response with a 503 on deny.                                             |
 | `proxy_on_done`             | `(context_id) -> i32`                             | Returns 1.                                                                                                                                                                                            |
+
+### Phase-to-target mapping
+
+| Phase                       | Target rule      | Input shape                     | Deny status |
+| --------------------------- | ---------------- | ------------------------------- | ----------- |
+| `proxy_on_request_headers`  | `allow`          | `{method, path, headers}`       | 403         |
+| `proxy_on_request_body`     | `allow_body`     | `{body, body_raw}`              | 403 + Pause |
+| `proxy_on_response_headers` | `allow_response` | `{response: {status, headers}}` | 503         |
+
+The three phases evaluate independently. A single `Modules` bundle
+can carry rules for each phase.
+
+**Phase opt-in via rule name.** At configure time the shim scans the
+policy JSON for the strings `"allow_body"` and `"allow_response"`. If
+either is absent the corresponding callback short-circuits as a
+no-op without running `evaluate`. This preserves v0.1.0 behaviour
+for policies that only define `allow`: the body and response phases
+are silent until the user explicitly opts in by writing a rule with
+the matching name. Detection is a substring match; false positives
+(e.g. a literal `"allow_body"` string in policy data) only cause an
+extra eval, never an incorrect decision.
 
 ### Generic ABI (not proxy-wasm)
 
-| Name       | Signature                                         | Notes                                                                                                            |
-| ---------- | ------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------- |
-| `evaluate` | `(input_ptr, input_len, ast_ptr, ast_len) -> i32` | Returns 1=allow, 0=deny, -1=error. The arena is reset before returning, so caller buffers stay valid throughout. |
+| Name                 | Signature                                                                                                                              | Notes                                                                                                            |
+| -------------------- | -------------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------- |
+| `evaluate`           | `(input_ptr, input_len, ast_ptr, ast_len) -> i32`                                                                                      | Targets package `""` + rule `"allow"`. 1=allow, 0=deny, -1=error. Arena reset on every exit.                     |
+| `evaluate_target`    | `(input_ptr, input_len, ast_ptr, ast_len, target_ptr, target_len) -> i32`                                                              | Same as `evaluate` but with an explicit target rule (e.g. `allow_response`, `allow_body`).                       |
+| `evaluate_addressed` | `(input_ptr, input_len, ast_ptr, ast_len, package_ptr, package_len, target_ptr, target_len) -> i32`                                    | Dispatches into a specific `(package, rule)` pair within a `{"type":"modules", ...}` bundle.                     |
 
 ## Imports
 

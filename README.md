@@ -1,7 +1,7 @@
 # zopa
 
 Tiny, zero-allocation authorization engine for proxy-wasm and the edge.
-~50 KB. No GC. No deps.
+~60 KB. No GC. No deps.
 
 [![License](https://img.shields.io/badge/license-Apache%202.0-blue.svg)](LICENSE)
 [![CI](https://github.com/0-draft/zopa/actions/workflows/ci.yml/badge.svg)](https://github.com/0-draft/zopa/actions/workflows/ci.yml)
@@ -30,7 +30,7 @@ will change before 1.0.
 
 ## Why zopa
 
-**Size.** A release build is around 50 KB. OPA's WASM build is
+**Size.** A release build is around 60 KB. OPA's WASM build is
 two orders of magnitude larger; Cedar and Casbin don't ship as wasm
 modules at all.
 
@@ -39,13 +39,16 @@ modules at all.
 each call. After a brief warm-up, `memory.grow` doesn't fire again --
 the wasm linear memory footprint stays flat regardless of throughput.
 
-**proxy-wasm native.** `proxy_on_request_headers` and the rest of
-the lifecycle exports are first-class. The repo ships an Envoy
-bootstrap (`examples/envoy/`) that's exercised in CI.
+**proxy-wasm native.** `proxy_on_request_headers` runs the `allow`
+target rule; `proxy_on_request_body` and `proxy_on_response_headers`
+fire `allow_body` / `allow_response` when present. Lifecycle exports
+are first-class. The repo ships an Envoy bootstrap
+(`examples/envoy/`) exercised in CI.
 
 **No DSL to learn.** zopa accepts a Rego-flavored AST as JSON. Use
-OPA's compiler to produce it; zopa runs it. The wasm module is the
-runtime, not the language.
+OPA's compiler to produce it (`tools/rego2ast.py` covers the v1
+subset against `opa parse --format json`); zopa runs it. The wasm
+module is the runtime, not the language.
 
 **No external dependencies.** Just Zig 0.16+ stdlib. The whole code
 fits in `src/` and reads top-to-bottom.
@@ -146,9 +149,15 @@ The AST is Rego-shaped JSON. Full reference: [`docs/ast.md`](docs/ast.md).
 ```
 
 Supported nodes: `value`, `ref`, `compare` (`eq`/`neq`/`lt`/`lte`/`gt`/`gte`),
-`not`, `set`, `some`, `every`, `module`, `rule`. The `type` field
-accepts shorthand for compare ops (`{"type": "eq", ...}` is the same
-as `{"type": "compare", "op": "eq", ...}`).
+`not`, `set`, `some`, `every`, `call`, `module`, `modules`, `rule`.
+The `type` field accepts shorthand for compare ops (`{"type": "eq", ...}`
+is the same as `{"type": "compare", "op": "eq", ...}`).
+
+Builtin functions surfaced via `call`: `startswith`, `endswith`,
+`contains`, `count`. Object iteration supports `kind: "keys"`
+(default) or `"values"` on `some` / `every`. Multi-package bundles
+use `{"type": "modules", "modules": [...]}` and dispatch via
+`evaluate_addressed(input, ast, package, rule)`.
 
 ## Architecture
 
@@ -182,7 +191,7 @@ You need Zig 0.16.0:
 ```bash
 brew install zig                # or download from ziglang.org
 zig build                       # debug build
-zig build --release=small       # ~50 KB optimized .wasm
+zig build --release=small       # ~60 KB optimized .wasm
 ```
 
 The artifact is `zig-out/bin/zopa.wasm`.
@@ -193,10 +202,13 @@ zopa runs the same suite under three hosts. None of them are
 required; pick what's installed.
 
 ```bash
-zig build test            # Node.js (must have node 18+)
-zig build test-wasmtime   # wasmtime via Python (see test/requirements.txt)
-zig build test-envoy      # real Envoy (brew install envoy)
-zig build test-all        # everything available
+zig build test-unit         # Zig host-side unit tests
+zig build test              # Node.js integration (must have node 18+)
+zig build test-wasmtime     # wasmtime via Python (see test/requirements.txt)
+zig build test-envoy        # real Envoy (brew install envoy)
+zig build test-conformance  # `opa parse` + tools/rego2ast.py + zopa
+zig build bench             # zopa-only latency benchmark
+zig build test-all          # everything available
 ```
 
 Setup for the Python suite:
@@ -211,7 +223,7 @@ python3 -m venv .venv-test
 |                  | [OPA][opa]     | [Cedar][cedar] | [Casbin][casbin] | zopa                       |
 | ---------------- | -------------- | -------------- | ---------------- | -------------------------- |
 | Language         | Go             | Rust           | Go (+ ports)     | Zig                        |
-| Released as wasm | Yes (~30 MB)   | No             | No               | Yes (~50 KB)               |
+| Released as wasm | Yes (~30 MB)   | No             | No               | Yes (~60 KB)               |
 | Allocation model | GC             | RC + arenas    | GC               | per-request arena          |
 | proxy-wasm       | Side project   | No             | No               | First-class                |
 | Policy input     | Rego source    | Cedar source   | CSV / source     | Compiled AST (Rego-shaped) |
@@ -228,8 +240,9 @@ evaluate it inside a proxy-wasm filter without a 30 MB sidecar.
 
 ## Roadmap
 
-See [ROADMAP.md](ROADMAP.md). Body-aware and response-side policies,
-plus an OPA conformance harness, are the next big items.
+See [ROADMAP.md](ROADMAP.md). Streaming evaluation runtime,
+proxy-wasm 0.3.x migration, and expanding the OPA conformance
+corpus are the next big items.
 
 ## Contributing
 
